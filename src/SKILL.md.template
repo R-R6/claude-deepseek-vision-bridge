@@ -1,0 +1,22 @@
+---
+name: vision
+description: Give a text-only model vision by sending local or remote images to an OpenAI-compatible vision API and returning a text description.
+---
+
+# Vision
+
+当用户提供本地图片路径、远程图片 URL 或 `Saved attachments:` 路径，并要求描述、分析、识别或 OCR 时，调用全局 `vision.js`：
+
+```powershell
+node "$env:USERPROFILE\.claude\skills\vision\vision.js" "<图片绝对路径>" "<用户的问题>"
+```
+
+远程图片：
+
+```powershell
+node "$env:USERPROFILE\.claude\skills\vision\vision.js" --url "<图片 URL>" "<用户的问题>"
+```
+
+脚本从环境变量读取 `VISION_API_KEY`、`VISION_BASE_URL` 和 `VISION_MODEL`。不得把 API Key 写入项目、日志或回复。
+
+> 这份 Skill 是手动后备入口。Claude Code 直接粘贴图片时，由网络层 `vision-bridge.js` 在请求到达纯文本上游前完成图片转文字。
