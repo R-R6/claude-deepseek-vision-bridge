@@ -76,6 +76,7 @@ Copy-Item .\src\SKILL.md.template -Destination (Join-Path $skillDir "SKILL.md")
 [Environment]::SetEnvironmentVariable("VISION_MODEL", "step-3.7-flash", "User")
 [Environment]::SetEnvironmentVariable("UPSTREAM", "<原始 DeepSeek 供应商 Base URL>", "User")
 [Environment]::SetEnvironmentVariable("BRIDGE_PORT", "15720", "User")
+[Environment]::SetEnvironmentVariable("BRIDGE_MAX_VISION_JOBS", "16", "User")
 ```
 
 完全退出并重新打开终端、CC Switch 和 Claude Code，使进程继承新环境。然后启动并检查：
@@ -100,6 +101,12 @@ node "$env:USERPROFILE\.claude\skills\vision\vision.js" --url https://example.co
 
 图片会发送给 StepFun 或你配置的视觉服务。不要提交包含密码、令牌、私密代码或不应外传数据的截图。
 
+默认每个请求最多转换 8 张图片，超过后返回 413；这是费用和资源保护上限，不影响一次粘贴单图或少量多图。视觉转换默认最多并发 2 个请求；同时最多接收 16 条含图任务，超过后返回 429 并提示稍后重试。Word、Excel 等文档继续由 Claude Code 的对应内置 Skill 处理，不会因为这个图片上限改走多模态 OCR。
+
+若将 `BRIDGE_HOST` 改为局域网或其他非 loopback 地址，必须同时设置 `BRIDGE_AUTH_TOKEN`，否则桥会拒绝启动。
+
+`VISION_BASE_URL` 和 `UPSTREAM` 默认要求使用 HTTPS；仅 loopback 的 HTTP 地址可用于本地服务和测试。设置 `ALLOW_INSECURE_HTTP=1` 可以显式允许远程 HTTP，但会明文传输凭据和图片，不建议在生产环境使用。
+
 ## 支持范围
 
 - Anthropic Messages：`image`，支持 base64 和 URL source。
@@ -108,7 +115,7 @@ node "$env:USERPROFILE\.claude\skills\vision\vision.js" --url https://example.co
 - 不宣称支持 OpenAI Responses API 的 `input_image`。
 - `UPSTREAM` 可以是域名根地址，也可以包含 `/v1` 等基础路径。
 
-超时可通过 `VISION_TIMEOUT_MS`、`UPSTREAM_TIMEOUT_MS` 调整，请求体上限通过 `BRIDGE_MAX_BODY_BYTES` 调整。
+单次视觉调用和上游请求超时可通过 `VISION_TIMEOUT_MS`、`UPSTREAM_TIMEOUT_MS` 调整；视觉服务响应上限通过 `VISION_MAX_RESPONSE_BYTES` 调整；请求体、图片数量、视觉并发和任务总数上限分别通过 `BRIDGE_MAX_BODY_BYTES`、`BRIDGE_MAX_IMAGES`、`BRIDGE_MAX_CONCURRENT_VISION_REQUESTS`、`BRIDGE_MAX_VISION_JOBS` 调整。入站请求头、请求体、整条含图任务和 Keep-Alive 超时分别通过 `BRIDGE_HEADERS_TIMEOUT_MS`、`BRIDGE_BODY_TIMEOUT_MS`、`BRIDGE_TOTAL_REQUEST_TIMEOUT_MS`、`BRIDGE_KEEP_ALIVE_TIMEOUT_MS` 调整。
 
 ## 测试
 
@@ -117,4 +124,4 @@ npm.cmd run check
 npm.cmd test
 ```
 
-测试使用本地 mock 服务，不访问 StepFun，不读取真实 API Key。覆盖图片转换、无图透传、`/v1` 路径、查询参数、chunked framing 和可选桥认证。
+测试使用本地 mock 服务，不访问 StepFun，不读取真实 API Key。覆盖图片转换、无图透传、`/v1` 路径、查询参数、chunked framing、可选桥认证和图片数量上限。
