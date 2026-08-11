@@ -282,37 +282,59 @@ function upstreamUrlFor(urlPath) {
 }
 
 function proxyRequest(clientReq, clientRes, urlPath, body, signal) {
-  let upstreamUrl;
-  try {
-    upstreamUrl = upstreamUrlFor(urlPath);
-  } catch (error) {
-    clientRes.writeHead(400, { "content-type": "text/plain; charset=utf-8" });
-    clientRes.end(`invalid request path: ${error.message}`);
-    return;
-  }
-  const transport = upstreamUrl.protocol === "https:" ? https : http;
-  const headers = stripHopByHopHeaders(clientReq.headers);
-  headers.host = upstreamUrl.host;
-  delete headers["x-bridge-token"];
-  if (body?.length) headers["content-length"] = body.length;
-  else delete headers["content-length"];
-
-  const req = transport.request(upstreamUrl, { method: clientReq.method, headers, signal }, (res) => {
-    clientRes.writeHead(res.statusCode || 502, stripHopByHopHeaders(res.headers));
-    res.pipe(clientRes);
-  });
-  req.on("error", (error) => {
-    if (signal?.aborted) return;
-    log("UPSTREAM-ERR", pathOnly(urlPath), error.code || error.message);
-    if (!clientRes.headersSent) {
-      clientRes.writeHead(502, { "content-type": "text/plain; charset=utf-8" });
+  return new Promise((resolve) => {
+    let upstreamUrl;
+    try {
+      upstreamUrl = upstreamUrlFor(urlPath);
+    } catch (error) {
+      clientRes.writeHead(400, { "content-type": "text/plain; charset=utf-8" });
+      clientRes.end(`invalid request path: ${error.message}`);
+      resolve();
+      return;
     }
-    clientRes.end("bridge upstream error");
+    const transport = upstreamUrl.protocol === "https:" ? https : http;
+    const headers = stripHopByHopHeaders(clientReq.headers);
+    headers.host = upstreamUrl.host;
+    delete headers["x-bridge-token"];
+    if (body?.length) headers["content-length"] = body.length;
+    else delete headers["content-length"];
+
+    let settled = false;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      resolve();
+    };
+    const handleError = (error) => {
+      if (!signal?.aborted) {
+        log("UPSTREAM-ERR", pathOnly(urlPath), error.code || error.message);
+        if (!clientRes.headersSent) {
+          clientRes.writeHead(502, { "content-type": "text/plain; charset=utf-8" });
+        }
+        if (!clientRes.writableEnded) clientRes.end("bridge upstream error");
+      }
+      finish();
+    };
+
+    let req;
+    try {
+      req = transport.request(upstreamUrl, { method: clientReq.method, headers, signal }, (res) => {
+        clientRes.writeHead(res.statusCode || 502, stripHopByHopHeaders(res.headers));
+        res.once("error", finish);
+        res.once("end", finish);
+        res.once("close", finish);
+        res.pipe(clientRes);
+      });
+    } catch (error) {
+      handleError(error);
+      return;
+    }
+    req.on("error", handleError);
+    req.setTimeout(UPSTREAM_TIMEOUT_MS, () => {
+      req.destroy(new Error(`Upstream timed out after ${UPSTREAM_TIMEOUT_MS} ms`));
+    });
+    req.end(body?.length ? body : undefined);
   });
-  req.setTimeout(UPSTREAM_TIMEOUT_MS, () => {
-    req.destroy(new Error(`Upstream timed out after ${UPSTREAM_TIMEOUT_MS} ms`));
-  });
-  req.end(body?.length ? body : undefined);
 }
 
 function jsonResponse(res, status, body, extraHeaders = {}) {
@@ -326,10 +348,20 @@ function jsonResponse(res, status, body, extraHeaders = {}) {
 const server = http.createServer((clientReq, clientRes) => {
   const urlPath = clientReq.url || "/";
   const abortController = new AbortController();
-  clientReq.on("aborted", () => abortController.abort());
-  clientReq.on("error", () => abortController.abort());
+  let releaseJob = null;
+  clientReq.on("aborted", () => {
+    abortController.abort();
+    releaseJob?.();
+  });
+  clientReq.on("error", () => {
+    abortController.abort();
+    releaseJob?.();
+  });
   clientRes.on("close", () => {
-    if (!clientRes.writableFinished) abortController.abort();
+    if (!clientRes.writableFinished) {
+      abortController.abort();
+      releaseJob?.();
+    }
   });
   log("REQ", clientReq.method, pathOnly(urlPath));
 
@@ -342,6 +374,20 @@ const server = http.createServer((clientReq, clientRes) => {
     return;
   }
 
+  if (isSupportedPath(urlPath)) {
+    releaseJob = reserveVisionJob();
+    if (!releaseJob) {
+      jsonResponse(
+        clientRes,
+        429,
+        { error: "too many vision requests in progress; retry later" },
+        { "retry-after": "1" },
+      );
+      clientReq.resume();
+      return;
+    }
+  }
+
   const chunks = [];
   let totalBytes = 0;
   let rejected = false;
@@ -351,6 +397,7 @@ const server = http.createServer((clientReq, clientRes) => {
     if (totalBytes > MAX_BODY_BYTES) {
       rejected = true;
       abortController.abort();
+      releaseJob?.();
       clientRes.writeHead(413, { "content-type": "text/plain; charset=utf-8" });
       clientRes.end("bridge request body is too large");
       clientReq.destroy();
@@ -359,9 +406,13 @@ const server = http.createServer((clientReq, clientRes) => {
     chunks.push(chunk);
   });
   clientReq.on("end", async () => {
-    if (rejected || abortController.signal.aborted) return;
+    if (rejected || abortController.signal.aborted) {
+      releaseJob?.();
+      return;
+    }
     const rawBody = Buffer.concat(chunks);
     if (!isSupportedPath(urlPath) || rawBody.length === 0) {
+      releaseJob?.();
       proxyRequest(clientReq, clientRes, urlPath, rawBody, abortController.signal);
       return;
     }
@@ -369,29 +420,21 @@ const server = http.createServer((clientReq, clientRes) => {
     try {
       payload = JSON.parse(rawBody.toString("utf8"));
     } catch {
+      releaseJob?.();
       proxyRequest(clientReq, clientRes, urlPath, rawBody, abortController.signal);
       return;
     }
     const totalImages = imageCount(payload);
     if (totalImages > MAX_IMAGES) {
+      releaseJob?.();
       jsonResponse(clientRes, 413, {
         error: `too many images; maximum is ${MAX_IMAGES}`,
       });
       return;
     }
     if (totalImages === 0) {
+      releaseJob?.();
       proxyRequest(clientReq, clientRes, urlPath, rawBody, abortController.signal);
-      return;
-    }
-
-    const releaseJob = reserveVisionJob();
-    if (!releaseJob) {
-      jsonResponse(
-        clientRes,
-        429,
-        { error: "too many vision requests in progress; retry later" },
-        { "retry-after": "1" },
-      );
       return;
     }
 
@@ -407,19 +450,22 @@ const server = http.createServer((clientReq, clientRes) => {
         }
       }
       if (!abortController.signal.aborted) {
-        proxyRequest(
+        await proxyRequest(
           clientReq,
           clientRes,
           urlPath,
           Buffer.from(JSON.stringify(payload), "utf8"),
           abortController.signal,
         );
+        if (timedOut && !clientRes.headersSent && !clientRes.writableEnded) {
+          jsonResponse(clientRes, 504, { error: "vision request timed out" });
+        }
       }
     } catch (error) {
-      if (!abortController.signal.aborted) {
+      if (!abortController.signal.aborted && !clientRes.headersSent) {
         log("VISION-ERR", error.code || error.message);
         jsonResponse(clientRes, 502, { error: "vision conversion failed" });
-      } else if (timedOut && !clientRes.writableEnded) {
+      } else if (timedOut && !clientRes.headersSent && !clientRes.writableEnded) {
         jsonResponse(clientRes, 504, { error: "vision request timed out" });
       }
     } finally {

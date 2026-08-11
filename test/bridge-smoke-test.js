@@ -47,6 +47,23 @@ function startPost(port, urlPath, payload) {
   return req;
 }
 
+function startPartialPost(port, urlPath, prefix = '{"messages":') {
+  const req = http.request({
+    host: "127.0.0.1",
+    port,
+    path: urlPath,
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "content-length": 1000,
+      "x-bridge-token": "test-bridge-token",
+    },
+  });
+  req.on("error", () => {});
+  req.write(prefix);
+  return req;
+}
+
 function get(port, urlPath, token = "") {
   return new Promise((resolve, reject) => {
     const headers = token ? { "x-bridge-token": token } : {};
@@ -102,6 +119,9 @@ async function main() {
   let visionGate = Promise.resolve();
   let releaseHeldVision = () => {};
   let visionStarted = 0;
+  let holdUpstream = false;
+  let upstreamGate = Promise.resolve();
+  let releaseHeldUpstream = () => {};
   const vision = http.createServer((req, res) => {
     req.resume();
     req.on("end", async () => {
@@ -121,8 +141,10 @@ async function main() {
     let body = "";
     req.setEncoding("utf8");
     req.on("data", (chunk) => { body += chunk; });
-    req.on("end", () => {
+    req.on("end", async () => {
       seen.push({ url: req.url, headers: req.headers, payload: JSON.parse(body) });
+      if (holdUpstream) await upstreamGate;
+      if (res.writableEnded) return;
       res.writeHead(200, {
         "content-type": "application/json",
         connection: "x-hop-by-hop, keep-alive",
@@ -191,6 +213,15 @@ async function main() {
     assert.equal(rejectedImages.status, 413);
     assert.match(rejectedImages.body.error, /maximum is 8/);
 
+    const partialRequests = Array.from({ length: 16 }, () => (
+      startPartialPost(bridgePort, "/v1/chat/completions")
+    ));
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    const preBodyRejected = await post(bridgePort, "/v1/chat/completions", imagePayload());
+    assert.equal(preBodyRejected.status, 429);
+    partialRequests.forEach((request) => request.destroy());
+    await new Promise((resolve) => setTimeout(resolve, 100));
+
     holdVision = true;
     visionStarted = 0;
     visionGate = new Promise((resolve) => { releaseHeldVision = resolve; });
@@ -226,6 +257,13 @@ async function main() {
     holdVision = false;
     releaseHeldVision();
 
+    holdUpstream = true;
+    upstreamGate = new Promise((resolve) => { releaseHeldUpstream = resolve; });
+    const upstreamTimedOut = post(bridgePort, "/v1/chat/completions", imagePayload());
+    assert.equal((await upstreamTimedOut).status, 504);
+    holdUpstream = false;
+    releaseHeldUpstream();
+
     assertConfigRejected({
       BRIDGE_PORT: "19002",
       UPSTREAM: "http://example.com/v1",
@@ -237,8 +275,13 @@ async function main() {
       VISION_BASE_URL: "http://example.com/v1",
       VISION_API_KEY: "test-key",
     }, /VISION_BASE_URL must use https/);
+    assertConfigRejected({
+      BRIDGE_PORT: "19004",
+      UPSTREAM: "http://127.evil.example/v1",
+      VISION_API_KEY: "test-key",
+    }, /UPSTREAM must use https/);
 
-    assert.equal(seen.length, 20);
+    assert.equal(seen.length, 21);
     assert.equal(seen[0].url, "/v1/messages?beta=1");
     assert.equal(seen[0].headers["transfer-encoding"], undefined);
     assert.equal(seen[0].headers["x-bridge-token"], undefined);
@@ -253,6 +296,8 @@ async function main() {
   } finally {
     holdVision = false;
     releaseHeldVision();
+    holdUpstream = false;
+    releaseHeldUpstream();
     bridge.kill();
     await close(vision);
     await close(upstream);

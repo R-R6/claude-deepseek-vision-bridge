@@ -1,5 +1,6 @@
 const http = require("node:http");
 const https = require("node:https");
+const net = require("node:net");
 
 function positiveInteger(value, fallback, name, minimum = 1, maximum = Number.MAX_SAFE_INTEGER) {
   const parsed = value === undefined || value === "" ? fallback : Number(value);
@@ -11,10 +12,10 @@ function positiveInteger(value, fallback, name, minimum = 1, maximum = Number.MA
 
 function isLoopbackHostname(hostname) {
   const normalized = String(hostname || "").toLowerCase().replace(/^\[|\]$/g, "");
-  return normalized === "localhost"
-    || normalized === "::1"
-    || normalized === "::ffff:127.0.0.1"
-    || /^127\./.test(normalized);
+  if (normalized === "localhost" || normalized === "::1" || normalized === "::ffff:127.0.0.1") {
+    return true;
+  }
+  return net.isIP(normalized) === 4 && normalized.split(".")[0] === "127";
 }
 
 function validateServiceUrl(baseUrl, name) {
