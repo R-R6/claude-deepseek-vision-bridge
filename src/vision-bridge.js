@@ -11,6 +11,8 @@ const {
   validateServiceUrl,
 } = require("./vision-client");
 
+const BRIDGE_VERSION = "0.2.1";
+
 function configurationError(message) {
   console.error(`Configuration error: ${message}`);
   process.exit(1);
@@ -370,7 +372,11 @@ const server = http.createServer((clientReq, clientRes) => {
     return;
   }
   if (clientReq.method === "GET" && ["/", "/health"].includes(pathOnly(urlPath))) {
-    jsonResponse(clientRes, 200, { ok: true, service: "vision-bridge" });
+    jsonResponse(clientRes, 200, {
+      ok: true,
+      service: "vision-bridge",
+      version: BRIDGE_VERSION,
+    });
     return;
   }
 
