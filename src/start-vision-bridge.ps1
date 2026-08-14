@@ -297,12 +297,16 @@ try {
             throw "Port $port became occupied by a process that is not the installed Vision Bridge; refusing to reuse it: $($listenerStatus.Details)."
         }
         if ($listenerStatus.Managed -and (Test-BridgeHealth)) {
-            $null = Save-RollbackSnapshot -Settings ([pscustomobject]@{
+            $rollbackStateSaved = Save-RollbackSnapshot -Settings ([pscustomobject]@{
                 Host = $hostName
                 Port = $port
                 StartupTimeoutMs = $startupTimeoutMs
             })
-            Write-Output "Vision Bridge started and passed health check on port $port. Logs: $logPath"
+            if ($rollbackStateSaved) {
+                Write-Output "Vision Bridge started and passed health check on port $port. Logs: $logPath"
+            } else {
+                Write-Warning "Vision Bridge started on port $port, but its protected rollback state was not saved. Restart Windows before changing bridge configuration."
+            }
             exit 0
         }
         if ($bridgeProcess.HasExited) {

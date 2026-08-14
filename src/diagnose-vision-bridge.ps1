@@ -124,6 +124,8 @@ try {
 } catch {
     $upstreamValid = $false
 }
+$rollbackStatePath = Join-Path $env:USERPROFILE ".claude\bridge\bridge-rollback-state.dat"
+$rollbackStateAvailable = Test-Path -LiteralPath $rollbackStatePath -PathType Leaf
 
 Write-Output "Vision Bridge / CC Switch diagnostic (read-only)"
 [pscustomobject]@{
@@ -154,6 +156,15 @@ Write-Output "Vision Bridge / CC Switch diagnostic (read-only)"
     Check = "Required process configuration"
     Status = if ($bridgePortValid -and $upstreamValid -and (Get-ProcessSetting "VISION_API_KEY")) { "PASS" } else { "FAIL" }
     Detail = "UPSTREAM URL and required secret presence are checked; no secret or URL value is displayed"
+} | Format-Table -AutoSize
+[pscustomobject]@{
+    Check = "Restart rollback state"
+    Status = if ($rollbackStateAvailable) { "PASS" } else { "WARN" }
+    Detail = if ($rollbackStateAvailable) {
+        "protected state is available for configuration reload"
+    } else {
+        "missing; restart Windows before changing configuration, or use the documented bootstrap migration only when current settings are unchanged"
+    }
 } | Format-Table -AutoSize
 
 if ($SkipCCSwitch) {

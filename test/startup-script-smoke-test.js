@@ -888,6 +888,7 @@ async function main() {
     assert.equal(diagnosticStart.status, 0, diagnosticStart.stdout + "\n" + diagnosticStart.stderr);
     const diagnosticPass = runDiagnosticWithOutput(diagnosticCase.root, diagnosticCase.port, { expectPass: true });
     assert.match(diagnosticPass.stdout, /Required process configuration/);
+    assert.match(diagnosticPass.stdout, /Restart rollback state/);
     const routerPort = await freePort();
     const routerDiagnosticPass = runDiagnosticWithOutput(
       diagnosticCase.root,
