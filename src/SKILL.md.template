@@ -5,18 +5,32 @@ description: Give a text-only model vision by sending local or remote images to 
 
 # Vision
 
-当用户提供本地图片路径、远程图片 URL 或 `Saved attachments:` 路径，并要求描述、分析、识别或 OCR 时，调用全局 `vision.js`：
+当用户提供本地图片路径、远程图片 URL 或 `Saved attachments:` 路径，并要求描述、分析、识别或 OCR 时，调用全局 Vision Skill。
+
+在 macOS 上：
+
+```sh
+sh "$HOME/.claude/skills/vision/vision.sh" "<图片绝对路径>" "<用户的问题>"
+```
+
+在 Windows PowerShell 上：
 
 ```powershell
 node "$env:USERPROFILE\.claude\skills\vision\vision.js" "<图片绝对路径>" "<用户的问题>"
 ```
 
-远程图片：
+远程图片（macOS）：
+
+```sh
+sh "$HOME/.claude/skills/vision/vision.sh" --url "<图片 URL>" "<用户的问题>"
+```
+
+远程图片（Windows PowerShell）：
 
 ```powershell
 node "$env:USERPROFILE\.claude\skills\vision\vision.js" --url "<图片 URL>" "<用户的问题>"
 ```
 
-脚本从环境变量读取 `VISION_API_KEY`、`VISION_BASE_URL` 和 `VISION_MODEL`。不得把 API Key 写入项目、日志或回复。
+Windows 脚本从当前用户环境读取 `VISION_API_KEY`、`VISION_BASE_URL` 和 `VISION_MODEL`；macOS 包装脚本只从受保护的 `~/.claude/bridge/bridge.env` 加载它们。不得把 API Key 写入项目、日志或回复。
 
 > 这份 Skill 是手动后备入口。Claude Code 直接粘贴图片时，由网络层 `vision-bridge.js` 在请求到达纯文本上游前完成图片转文字。

@@ -18,7 +18,8 @@ function main() {
   try {
     if (request.operation === "backup") {
       if (typeof request.backupPath !== "string") throw new Error("Missing backup path.");
-      fs.writeFileSync(request.backupPath, database.serialize());
+      const escapedBackupPath = request.backupPath.replace(/'/g, "''");
+      database.exec(`VACUUM INTO '${escapedBackupPath}'`);
       return;
     }
     if (typeof request.sql !== "string") throw new Error("Missing SQL statement.");

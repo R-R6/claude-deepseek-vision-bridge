@@ -12,6 +12,7 @@
 
 <p align="center">
   <a href="#快速开始">快速开始</a> ·
+  <a href="#macos-登录后自动启动">macOS</a> ·
   <a href="#给其他-ai-的一键安装指令">交给 AI 安装</a> ·
   <a href="#更换文本-deepseek-上游">更换上游</a> ·
   <a href="#安全边界">安全边界</a> ·
@@ -44,7 +45,7 @@ flowchart LR
 
 ## 快速开始
 
-需要：Windows、Node.js 18+、Git（如果使用 `git clone`）、Claude Code，以及一个能把 Claude Code 请求送到本桥的路由器、协议适配器或兼容上游。CC Switch 是已验证的推荐路由器，但不是桥的硬性依赖。
+需要：Windows 或 macOS、Node.js 18+、Git（如果使用 `git clone`）、Claude Code，以及一个能把 Claude Code 请求送到本桥的路由器、协议适配器或兼容上游。CC Switch 是已验证的推荐路由器，但不是桥的硬性依赖。
 
 先选择路由模式：
 
@@ -212,18 +213,165 @@ powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "$env:USERPROFIL
 
 如需卸载，先用 `%USERPROFILE%\.claude\bridge\restore-ccswitch-startup.ps1` 恢复 CC Switch 原始启动命令，再删除本项目安装的桥、Skill 和 Startup 文件；确认恢复成功前保留 `cc-switch-startup.command` 与 `backups`。
 
+### macOS 版一键安装指令
+
+如果要把 macOS 安装交给 Claude Code、Codex 或其他能执行本机命令的 AI，可复制下面整段。视觉 API Key 不放进公开文本；让执行安装的 AI 使用本次会话中已提供的密钥，并通过交互输入或受保护文件写入。
+
+<details>
+<summary>展开并复制完整 macOS 安装指令</summary>
+
+```text
+请在这台 macOS 电脑的当前用户范围内安装并配置 Claude DeepSeek Vision Bridge（不是 npm 全局包，也不是系统级安装）：
+https://github.com/R-R6/claude-deepseek-vision-bridge
+
+目标：Claude Desktop 的 Code 模式继续使用 CC Switch 中已配置的纯文本 DeepSeek；图片请求先进入本机 Vision Bridge，由视觉模型识图后再转发给原始文本上游。
+
+先完整阅读 README，再执行安装。不要修改仓库源码、不要执行 npm install、不要创建仓库内 .env 文件、不要提交或推送 Git 更改。仓库必须克隆到新的工作目录；如果目标目录已存在，先检查 remote -v 和 git status，不要删除或覆盖用户文件。
+
+网络规则：先检查直连访问 GitHub、npm 等外网资源；只有确认直连失败且本机确实能访问 http://127.0.0.1:7897 时，才给当前下载/测试命令临时设置 HTTP_PROXY 和 HTTPS_PROXY 重试。不要把代理写入 shell 配置、用户环境变量、仓库文件、CC Switch 配置或 LaunchAgent；下载完成后清除当前进程中的代理变量。
+
+路由模式：CC Switch 已配置
+CC Switch 路由处理：自动配置当前活动供应商到 Vision Bridge
+CC Switch app 类型：claude-desktop
+
+严格使用以下配置，不要猜测、替换或要求重复提供：
+- UPSTREAM（真实文本上游）：https://tokenrhythm.studio/v1
+- 文本 API Key：已在 CC Switch 中配置；不得读取、打印或写入 bridge.env
+- 文本 Model：deepseek-v4-flash-0731；由 CC Switch 保持，不得写入 bridge.env
+- VISION_BASE_URL：https://api.stepfun.com/v1
+- VISION_MODEL：step-3.7-flash
+- VISION_API_KEY：使用本次会话已提供的真实密钥；只写入 ~/.claude/bridge/bridge.env，文件权限必须为 600，绝不能回显
+- BRIDGE_HOST：127.0.0.1
+- BRIDGE_PORT：15720
+
+按以下顺序操作：
+
+1. 只检查存在性或版本，不回显秘密值：uname -s、node --version（>=18；自动 SQLite 路由建议 >=22.5 且提供 node:sqlite）、git --version、command -v claude、/Applications/Claude.app、/Applications/CC Switch.app、15720/15721 监听状态、~/.cc-switch/cc-switch.db、~/.cc-switch/settings.json，以及 bridge.env 是否存在。未知进程占用端口时不得停止。
+
+2. 确认视觉服务兼容 OpenAI Chat Completions，且 UPSTREAM 能接收桥转发的协议。字段缺失、格式错误、Node 版本不足、端口冲突或无法安全识别 claude-desktop 当前 provider 时，只报告具体问题并暂停。
+
+3. 新目录不存在时克隆仓库，例如 ~/Desktop/claude-deepseek-vision-bridge-macos；存在时只读检查并保留用户文件。进入仓库根目录，完整阅读 README。
+
+4. 运行离线检查，不安装依赖：
+   npm run check
+   npm test
+   sh -n src/*.sh
+
+5. 准备 ~/.claude/bridge/bridge.env：必须是普通文件、不能是符号链接、权限 600。如果它已存在，先只读检查并保留原文件；缺少或冲突字段只报告并暂停。如果不存在，使用 umask 077 和临时文件原子写入 UPSTREAM、VISION_BASE_URL、VISION_MODEL、BRIDGE_HOST、BRIDGE_PORT 和本次会话提供的视觉 API Key；不要把密钥放进命令参数或 shell 历史，写入后清除临时变量。
+
+6. 完全退出 CC Switch，并用 lsof 确认 ~/.cc-switch/cc-switch.db 未被打开；不要使用 pkill 或按名称强杀未知进程。然后在仓库根目录执行：
+   sh ./src/install-vision-bridge.sh \
+     --env-file "$HOME/.claude/bridge/bridge.env" \
+     --ccswitch-directory "$HOME/.cc-switch" \
+     --ccswitch-app "/Applications/CC Switch.app" \
+     --app-type claude-desktop \
+     --bridge-host 127.0.0.1 \
+     --bridge-port 15720 \
+     --configure-ccswitch-route
+
+   该命令必须先启动并验证受管 Bridge 健康，再创建可恢复备份，最后只修改当前 claude-desktop provider 的 settings_config.env.ANTHROPIC_BASE_URL 为 http://127.0.0.1:15720。不得读取、打印或修改文本 Key、文本 Model、其他 provider、UPSTREAM 或未知路由器。失败时保留原配置并报告备份路径和失败层。
+
+7. 安装完成后运行：
+   sh "$HOME/.claude/bridge/restart-vision-bridge.sh"
+   用已安装的 bridge-health.js 验证 http://127.0.0.1:15720/health；必须确认 ok=true、service=vision-bridge、version=0.2.1。若配置了 BRIDGE_AUTH_TOKEN，健康请求必须带 x-bridge-token，不得删除令牌。
+
+8. 重新打开 CC Switch，确认 15721 正在监听，然后运行以下只输出脱敏 URL 的状态检查：
+   node "$HOME/.claude/bridge/configure-ccswitch-route.js" \
+     --cc-switch-directory "$HOME/.cc-switch" \
+     --app-type claude-desktop \
+     --status
+   当前 claude-desktop provider 目标必须是 http://127.0.0.1:15720；Claude Desktop/Claude Code 到 CC Switch 的入口仍必须是 http://127.0.0.1:15721。不得把真实文本上游写成 CC Switch 最终目标。
+
+9. 运行只读诊断：
+   sh "$HOME/.claude/bridge/diagnose-vision-bridge.sh" --app-type claude-desktop
+   Bridge health、LaunchAgent、Required configuration、CC Switch local proxy 和 CC Switch provider route 必须通过。CC Switch 的登录启动开关由 CC Switch 自己维护；只有我另行明确要求时，才可追加 --coordinate-ccswitch-startup，不能擅自修改 launchOnStartup。
+
+10. 用 Claude Desktop Code 模式验证：先发一条无图片文本请求，再由我粘贴一张无敏感内容的图片，确认返回识别结果。需要测试本地路径时运行：
+    sh "$HOME/.claude/skills/vision/vision.sh" "/绝对路径/测试图片.png" "请读取图片中的关键文字"
+    不要把图片、API Key 或 Authorization 头写入日志；日志只报告错误类型和状态。
+
+11. 不要未经我确认重启 macOS。若要验证登录后流程，先询问我；确认后重启，登录并等待 10-30 秒，再直接打开 Claude Desktop 验证无需手动启动桥即可识图。
+
+只有 15720/health 返回受管版本、15721 正在监听、当前 claude-desktop provider 指向 15720、CC Switch 入口保持 15721、bridge.env 为 600，且无图片文本请求和真实粘贴图片测试都通过时，才报告安装成功。最终回复只报告状态、验证证据和备份路径，绝不回显任何 API Key。
+```
+
+</details>
+
+## macOS 登录后自动启动
+
+macOS 使用当前用户的 `launchd` Agent，不会修改 Windows 的 PowerShell、VBScript 或注册表入口。先在仓库根目录准备一个只允许当前用户读取的环境文件；它不会进入 Git。已有 `bridge.env` 会被保留，不会被示例文件覆盖：
+
+```sh
+mkdir -p "$HOME/.claude/bridge"
+bridge_env="$HOME/.claude/bridge/bridge.env"
+if [ -L "$bridge_env" ]; then
+  printf '%s\n' "Refusing to use a symlink environment file: $bridge_env" >&2
+  exit 1
+fi
+if [ ! -e "$bridge_env" ]; then
+  cp ./.env.example "$bridge_env"
+fi
+chmod 600 "$bridge_env"
+${EDITOR:-vi} "$bridge_env"
+```
+
+把 `UPSTREAM`、`VISION_API_KEY`、视觉模型三项填入这个文件。不要把真实 Key 写入仓库、命令行、日志或截图。安装器不会猜测或覆盖缺失配置，也不会把 API Key 写进 launchd plist；plist 只保存桥目录、Node 可执行文件和端口等非敏感值。
+
+安装桥、全局 Vision Skill 和用户 LaunchAgent：
+
+```sh
+sh ./src/install-vision-bridge.sh --env-file "$HOME/.claude/bridge/bridge.env"
+```
+
+安装后可用下面的入口重新加载配置、等待健康检查，或执行只读诊断：
+
+```sh
+sh "$HOME/.claude/bridge/restart-vision-bridge.sh"
+sh "$HOME/.claude/bridge/diagnose-vision-bridge.sh" --skip-ccswitch
+```
+
+默认只安装 Vision Bridge 的 LaunchAgent，不接管 CC Switch 的登录启动。若明确希望在桥健康后由 launchd 启动 `/Applications/CC Switch.app`，再显式加上：
+
+```sh
+sh ./src/install-vision-bridge.sh \
+  --env-file "$HOME/.claude/bridge/bridge.env" \
+  --coordinate-ccswitch-startup
+```
+
+这个选项只创建本项目自己的 coordinator，不修改 CC Switch 的 SQLite、供应商或 `launchOnStartup` 设置。取消它时，在 CC Switch 中恢复原有登录启动设置，并卸载本项目的 `com.claude.deepseek-vision-bridge.cc-switch` Agent。
+
+### macOS 上配置 CC Switch 路由
+
+先在 CC Switch 中确认文本 API Key 和 Model，再关闭正在运行的 CC Switch 以避免 SQLite 锁。Node.js 22.5+（或其他提供 `node:sqlite` 的构建）可使用项目提供的安全更新器：它只修改当前 `claude` 或 `claude-desktop` 供应商的 `settings_config.env.ANTHROPIC_BASE_URL`，写入前创建 `~/.cc-switch/backups/vision-bridge-*/cc-switch.db`，不会读取或输出 provider Key。它会从权限为 `600` 的 `~/.claude/bridge/bridge.env` 仅读取可选 `BRIDGE_AUTH_TOKEN`，用于认证 `/health` 请求：
+
+```sh
+node ./src/configure-ccswitch-route.js \
+  --cc-switch-directory "$HOME/.cc-switch" \
+  --app-type auto \
+  --bridge-port 15720
+```
+
+如果同时存在 `claude` 和 `claude-desktop` 两个当前供应商，必须显式传 `--app-type claude` 或 `--app-type claude-desktop`。更新后重新打开 CC Switch 和 Claude Code，并先验证无图片文本请求，再测试粘贴图片。若 Node 版本不提供 `node:sqlite`，手动在 CC Switch 中把目标地址改为 `http://127.0.0.1:15720`，不要把真实文本上游写回 CC Switch 目标。
+
+macOS 运行日志在 `~/.claude/bridge/vision-bridge.log`、`vision-bridge.err.log`；LaunchAgent 标签是 `com.claude.deepseek-vision-bridge`。需要查看当前路由但不修改数据库时：
+
+```sh
+node "$HOME/.claude/bridge/configure-ccswitch-route.js" \
+  --cc-switch-directory "$HOME/.cc-switch" --status
+```
+
 ## 与 CC Switch 一起工作
 
 | 位置 | 地址或变量 | 配置位置 |
 | --- | --- | --- |
 | Claude Code -> CC Switch | `http://127.0.0.1:15721` | Claude Code 的 `ANTHROPIC_BASE_URL` |
 | CC Switch -> Vision Bridge | `http://127.0.0.1:15720` | 当前活动供应商的目标地址 |
-| Vision Bridge -> 文本上游 | `UPSTREAM` | 当前 Windows 用户环境变量 |
-| Vision Skill -> 视觉服务 | `VISION_BASE_URL` | 当前 Windows 用户环境变量 |
+| Vision Bridge -> 文本上游 | `UPSTREAM` | Windows 用户环境变量；macOS `~/.claude/bridge/bridge.env` |
+| Vision Skill -> 视觉服务 | `VISION_BASE_URL` | Windows 用户环境变量；macOS `~/.claude/bridge/bridge.env` |
 
 Claude Code 和 Claude Desktop 可能使用不同的 CC Switch app 类型/供应商配置，请确认实际使用的那一项。不要把 `localhost`、`15720` 和 `15721` 的角色混用。
 
-CC Switch 是否随 Windows 登录启动仍由其自身设置控制；安装器不会创建或修改这个开关。`15720` 健康但 `15721` 未监听时，检查 `cc-switch-startup.log`；两端口都正常但请求绕过桥时，检查当前 app 类型和活动供应商目标地址。
+CC Switch 是否随登录启动仍由其自身设置控制；Windows 安装器不会创建或修改这个开关，macOS 只有显式传入 `--coordinate-ccswitch-startup` 才会创建本项目 coordinator。`15720` 健康但 `15721` 未监听时，检查 `cc-switch-startup.log`；两端口都正常但请求绕过桥时，检查当前 app 类型和活动供应商目标地址。
 
 默认安装不编辑 CC Switch 的 SQLite 数据库，也不改供应商、模型映射或路由。使用 `-ConfigureCCSwitchRoute` 时，安装器只会修改已识别当前 Claude 供应商的 Base URL，并执行备份、验证、失败回滚与 CC Switch 重启；它不会创建供应商、更改模型或读取密钥。其他路由器仍必须在其自身界面或受支持的管理接口中配置。
 
@@ -435,6 +583,15 @@ powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass `
 
 当 Agent 已经拿到图片路径或 URL，而不是 Claude Code 的原始粘贴请求时，可以直接调用后备入口：
 
+macOS 使用安装的包装脚本，它只从权限为 `600` 的 `bridge.env` 加载视觉配置：
+
+```sh
+sh "$HOME/.claude/skills/vision/vision.sh" "/Users/me/Desktop/screen.png" "请读取图片中的关键文字"
+sh "$HOME/.claude/skills/vision/vision.sh" --url "https://example.com/image.png" "请描述这张图"
+```
+
+Windows 使用当前用户环境变量：
+
 ```powershell
 node "$env:USERPROFILE\.claude\skills\vision\vision.js" "C:\Temp\screen.png" "请读取图片中的关键文字"
 node "$env:USERPROFILE\.claude\skills\vision\vision.js" --url "https://example.com/image.png" "请描述这张图"
@@ -454,6 +611,8 @@ node "$env:USERPROFILE\.claude\skills\vision\vision.js" --url "https://example.c
 | `BRIDGE_PORT` | `15720` | 本地桥端口 |
 | `BRIDGE_AUTH_TOKEN` | 空 | 可选桥令牌；请求头为 `x-bridge-token` |
 
+Windows 从当前用户环境读取这些变量；macOS 的 launchd Agent 和安装的 Vision Skill 包装脚本从 `~/.claude/bridge/bridge.env` 读取，并要求该文件保持 `600` 权限。桥运行时本身仍只依赖进程环境，不会自动读取仓库中的 `.env` 文件。
+
 ### 资源和超时限制
 
 默认值是保守的本机起点：一次请求最多 8 张图片、最多 2 个视觉 API 并发、最多 16 条含图任务。它们不会限制 Claude Code 对 Word、Excel 等文档 Skill 的处理。
@@ -471,7 +630,7 @@ node "$env:USERPROFILE\.claude\skills\vision\vision.js" --url "https://example.c
 | `BRIDGE_HEADERS_TIMEOUT_MS` | `30000` | 入站请求头超时 |
 | `BRIDGE_BODY_TIMEOUT_MS` | `120000` | 入站请求体超时 |
 | `BRIDGE_KEEP_ALIVE_TIMEOUT_MS` | `5000` | HTTP Keep-Alive 超时 |
-| `BRIDGE_STARTUP_TIMEOUT_MS` | `30000` | Windows 启动器等待受管 `/health` 通过的最长时间，范围 `1000`-`120000` |
+| `BRIDGE_STARTUP_TIMEOUT_MS` | `30000` | 启动器等待受管 `/health` 通过的最长时间，范围 `1000`-`120000` |
 | `BRIDGE_STARTUP_COORDINATOR_TIMEOUT_MS` | `120000` | CC Switch 登录启动协调器等待桥健康的最长时间；超时不启动 CC Switch，范围 `1000`-`300000` |
 | `ALLOW_INSECURE_HTTP` | `0` | 仅显式设为 `1` 时允许远程 HTTP；不建议使用 |
 
@@ -490,7 +649,7 @@ node "$env:USERPROFILE\.claude\skills\vision\vision.js" --url "https://example.c
 - 共享电脑上建议启用令牌，并确认 CC Switch 支持注入 `x-bridge-token`。令牌会在转发到上游前删除。
 - 图片会发送给你配置的视觉服务。不要提交包含密码、令牌、私密代码或不应外传数据的截图。
 - `VISION_BASE_URL` 和 `UPSTREAM` 默认要求 HTTPS；只有 loopback HTTP 可用于本地服务和测试。`ALLOW_INSECURE_HTTP=1` 会明文传输凭据和图片，仅用于你明确接受风险的场景。
-- 日志保存在 `%USERPROFILE%\.claude\bridge\vision-bridge.log` 和 `vision-bridge.err.log`，桥不会主动记录 API Key 或图片 base64。
+- Windows 日志保存在 `%USERPROFILE%\.claude\bridge\vision-bridge.log` 和 `vision-bridge.err.log`；macOS 日志保存在 `~/.claude/bridge/vision-bridge.log` 和 `vision-bridge.err.log`。桥不会主动记录 API Key 或图片 base64。
 
 ## 故障排查
 
@@ -505,17 +664,25 @@ node "$env:USERPROFILE\.claude\skills\vision\vision.js" --url "https://example.c
 | Word/Excel 处理异常 | 这类任务应由 Claude Code 对应内置 Skill 处理，不是本桥的 OCR 入口 |
 | 重启后出现 gateway connection error | 先运行 `diagnose-vision-bridge.ps1`：`15720` 不健康时修复 Startup/桥；`15721` 未监听时启动 CC Switch；两者都正常但请求绕过桥时检查当前 app 类型和供应商目标 |
 | `15720` 端口被占用 | 先用 `Get-NetTCPConnection` 和 `Get-CimInstance Win32_Process` 确认 PID、进程路径，再请求健康检查；健康的受管桥直接复用，未知进程不要停止；换端口时同步修改 `BRIDGE_PORT` 和 CC Switch 目标 |
+| macOS 登录后桥没有启动 | 运行 `sh ~/.claude/bridge/diagnose-vision-bridge.sh --skip-ccswitch`，检查 `launchctl print gui/$(id -u)/com.claude.deepseek-vision-bridge` 和 `vision-bridge.err.log`；确认 `bridge.env` 为 600 权限且包含 `UPSTREAM`、`VISION_API_KEY` |
 
 ## 测试与开发
 
-本项目无运行时依赖，要求 Node.js 18+。测试使用本地 mock 服务，不访问真实视觉服务，也不读取真实 API Key：
+本项目无运行时依赖，要求 Node.js 18+。测试使用本地 mock 服务，不访问真实视觉服务，也不读取真实 API Key。macOS 的自动 CC Switch 路由更新器需要 Node.js 22.5+ 的 `node:sqlite`：
 
 ```powershell
 npm.cmd run check
 npm.cmd test
 ```
 
-Smoke test 覆盖图片转换、无图透传、`/v1` 路径、查询参数、chunked framing、可选桥认证、图片数量上限、并发/排队、客户端断开、超时、HTTPS 校验和响应头过滤。Windows 启动脚本测试使用随机端口和临时带空格路径，覆盖认证健康检查、非桥占端口和启动超时，不触碰真实 `15720`/`15721`。
+macOS 使用：
+
+```sh
+npm run check
+npm test
+```
+
+Smoke test 覆盖图片转换、无图透传、`/v1` 路径、查询参数、chunked framing、可选桥认证、图片数量上限、并发/排队、客户端断开、超时、HTTPS 校验和响应头过滤。Windows 启动脚本测试使用随机端口和临时带空格路径，覆盖认证健康检查、非桥占端口和启动超时；macOS smoke test 在临时 HOME 下验证 LaunchAgent plist、启动脚本、健康检查和 SQLite 路由备份，不触碰真实 `~/.claude` 或 `~/.cc-switch`。
 
 项目文件：
 
@@ -523,16 +690,26 @@ Smoke test 覆盖图片转换、无图透传、`/v1` 路径、查询参数、chu
 | --- | --- |
 | `src/vision-bridge.js` | Claude Code/CC Switch 的本地透明桥 |
 | `src/vision.js` | 本地图片路径或远程 URL 的手动识图入口 |
+| `src/vision.sh` | macOS 手动识图包装脚本，从受保护的 `bridge.env` 加载配置 |
 | `src/vision-client.js` | 两种入口共用的 OpenAI-compatible 视觉客户端 |
 | `src/start-vision-bridge.ps1` | Windows 后台启动脚本 |
+| `src/start-vision-bridge.sh` | macOS 前台/launchd 启动脚本 |
 | `src/start-ccswitch-after-bridge.vbs` | 等待桥健康后再启动已存在的 CC Switch 登录命令 |
+| `src/start-ccswitch-after-bridge.sh` | macOS 可选 launchd CC Switch 协调器 |
 | `src/restore-ccswitch-startup.ps1` | 恢复安装器包装前的 CC Switch 登录命令 |
 | `src/install-vision-bridge.ps1` | 暂存、备份并安装桥、Vision Skill 和 Startup 入口 |
+| `src/install-vision-bridge.sh` | macOS 安装器，写入用户 LaunchAgent 并保留备份 |
 | `src/restart-vision-bridge.ps1` | 重新加载用户级配置并安全重启已安装的桥 |
+| `src/restart-vision-bridge.sh` | macOS 重新加载 LaunchAgent 并等待健康检查 |
 | `src/diagnose-vision-bridge.ps1` | 只读检查桥、CC Switch 代理和 Claude Code 路由 |
+| `src/diagnose-vision-bridge.sh` | macOS 只读检查桥、launchd、CC Switch 和路由 |
+| `src/configure-ccswitch-route.js` | 跨平台安全更新 CC Switch 当前 Claude 路由 |
+| `src/bridge-health.js` | 无密钥输出的健康检查辅助入口 |
 | `src/SKILL.md.template` | 全局 Vision Skill 模板 |
 | `test/bridge-smoke-test.js` | 无真实 API Key 的边界 smoke test |
 | `test/startup-script-smoke-test.js` | Windows 启动器隔离 smoke test |
+| `test/cc-switch-route-smoke-test.js` | Windows PowerShell 路由适配器 smoke test |
+| `test/macos-smoke-test.js` | macOS 安装器、LaunchAgent 和路由备份 smoke test |
 
 ## 项目来源与许可证
 

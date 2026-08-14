@@ -5,8 +5,8 @@
   "description": "Local image-to-text bridge for Claude Code with text-only DeepSeek upstreams.",
   "license": "MIT",
   "scripts": {
-    "check": "node --check src/vision-client.js && node --check src/vision-bridge.js && node --check src/vision.js && node --check src/cc-switch-sqlite.js && node --check test/bridge-smoke-test.js && node --check test/startup-script-smoke-test.js && node --check test/cc-switch-route-smoke-test.js",
-    "test": "node test/bridge-smoke-test.js && node test/startup-script-smoke-test.js && node test/cc-switch-route-smoke-test.js"
+    "check": "node --check src/vision-client.js && node --check src/vision-bridge.js && node --check src/vision.js && node --check src/bridge-health.js && node --check src/configure-ccswitch-route.js && node --check src/cc-switch-sqlite.js && node --check test/bridge-smoke-test.js && node --check test/startup-script-smoke-test.js && node --check test/cc-switch-route-smoke-test.js && node --check test/macos-smoke-test.js",
+    "test": "node test/bridge-smoke-test.js && node test/startup-script-smoke-test.js && node test/cc-switch-route-smoke-test.js && node test/macos-smoke-test.js"
   },
   "engines": {
     "node": ">=18"

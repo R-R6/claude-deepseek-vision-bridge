@@ -141,6 +141,10 @@ function readRoute(databasePath, appType = "claude") {
 }
 
 async function main() {
+  if (process.platform !== "win32") {
+    console.log("CC Switch route smoke test: SKIP (Windows PowerShell route adapter only)");
+    return;
+  }
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "vision-bridge-route-"));
   const ccSwitchDirectory = path.join(root, ".cc-switch");
   const backupDirectory = path.join(root, "backup");
