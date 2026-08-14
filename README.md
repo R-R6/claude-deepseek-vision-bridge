@@ -54,7 +54,7 @@ flowchart LR
 | 其他路由器已配置 | 真实文本上游 Base URL、视觉模型三项 | 配置桥、安装 Skill、安装登录启动入口 | 让现有路由器把请求送到桥，并保留路由器中的文本 Key/Model |
 | 直连桥 | 能接收 Claude Code Anthropic Messages 的文本上游，或提供 Anthropic-compatible 入口并负责后续转换的适配器地址、视觉模型三项，以及 Claude Code 使用的文本 Key/Model | 配置桥、安装 Skill、安装登录启动入口 | Claude Code 的桥地址、文本凭据和模型；桥不会把 Anthropic Messages 转换成 OpenAI，原生 OpenAI-only DeepSeek 地址不能直接作为直连桥的 `UPSTREAM` |
 
-桥不会编辑 CC Switch SQLite、供应商、模型映射或未知路由器配置。无论哪种模式，先完成桥安装，再分别验证桥健康、路由链路和最终图片请求。
+默认安装不会编辑 CC Switch SQLite、供应商、模型映射或未知路由器配置。CC Switch 模式可显式选择自动路由：它只会把已识别的当前 Claude 供应商的 `ANTHROPIC_BASE_URL` 改为健康桥地址，并在写入前创建可恢复数据库备份；无法安全识别时不会写入。无论哪种模式，先完成桥安装，再分别验证桥健康、路由链路和最终图片请求。
 
 ### 没有 CC Switch 时的协议边界
 
@@ -90,6 +90,9 @@ https://github.com/R-R6/claude-deepseek-vision-bridge
 路由模式（只选择一项）：
 - <CC Switch 已配置 / 其他路由器已配置 / 直连桥>
 
+CC Switch 路由处理（仅 CC Switch 模式选择一项）：
+- <手动确认当前活动供应商目标 / 自动配置当前活动供应商到 Vision Bridge>
+
 本次安装使用以下配置。请按字段使用这些值，不要猜测、替换或要求我重复提供：
 
 纯文本 DeepSeek 模型：
@@ -106,7 +109,8 @@ https://github.com/R-R6/claude-deepseek-vision-bridge
 - 纯文本模型 Base URL 写入当前用户环境变量 `UPSTREAM`；它是桥转发请求的真实上游地址，不是 CC Switch 的最终目标地址。
 - 视觉模型 Base URL、API Key 和 Model 分别写入 `VISION_BASE_URL`、`VISION_API_KEY`、`VISION_MODEL`。
 - 纯文本 API Key 和 Model 不由桥保存或推断：CC Switch 模式由我在 CC Switch 中维护，其他路由器模式由我在现有路由器中维护，直连桥模式由我在 Claude Code/协议适配器中维护。
-- 如果路由模式为 CC Switch 已配置，不要修改 CC Switch 的文本 Key、Model、供应商、路由或数据库；安装完成后提醒我由自己把当前活动供应商的目标地址确认或修改为 `http://127.0.0.1:15720`，并保留 Claude Code 到 CC Switch 的 `http://127.0.0.1:15721`。
+- 如果路由模式为 CC Switch 已配置且我选择“手动确认”，不要修改 CC Switch 的文本 Key、Model、供应商、路由或数据库；安装完成后提醒我由自己把当前活动供应商的目标地址确认或修改为 `http://127.0.0.1:15720`，并保留 Claude Code 到 CC Switch 的 `http://127.0.0.1:15721`。
+- 如果路由模式为 CC Switch 已配置且我明确选择“自动配置”，在桥健康后运行 `install-vision-bridge.ps1 -ConfigureCCSwitchRoute`。这已授权关闭并重启经过名称、路径和当前用户验证的 `cc-switch.exe`；只允许修改当前活动 Claude 供应商的 `settings_config.env.ANTHROPIC_BASE_URL`，不得读取、打印或修改文本 Key、模型、`UPSTREAM`、其他供应商或任何未知路由器。写入前必须确认 `sqlite3.exe` 可用，并报告可恢复的 SQLite 备份路径。
 - 如果路由模式为其他路由器已配置，不要猜测或修改未知路由器；使用 `-SkipCCSwitch -ExpectedRoutePort <现有路由器端口>` 诊断，或在端口未知时使用 `-SkipRouteCheck`，并提醒我确认现有路由器实际指向 `BRIDGE_PORT`。
 - 如果路由模式为直连桥，不要修改未知路由器；使用 `-SkipCCSwitch` 诊断，并提醒我确认 Claude Code 实际指向 `BRIDGE_PORT`。
 - 写入或验证时不要在命令输出、日志、截图、源码、README、CC Switch 备注或 Git 中显示 API Key；只报告是否配置成功。
@@ -114,13 +118,13 @@ https://github.com/R-R6/claude-deepseek-vision-bridge
 请按下面顺序替我完成：
 1. 先检查 `node --version`、`git --version`、Claude Code、当前路由器和用户级环境变量。只有 CC Switch 模式才检查 `15721`；其他模式不要因为没有 CC Switch 而失败。API Key 只能检查是否存在，不能读取或回显。
 2. 按所选模式检查必需字段：CC Switch/其他路由器模式至少需要真实文本 Base URL 和视觉三项；直连桥模式还必须确认 Claude Code 或协议适配器已有文本 Key/Model。CC Switch 模式下文本 API Key/Model 可以是“已在 CC Switch 中配置”，不得要求重复提供。确认视觉服务兼容 OpenAI Chat Completions，以及 `UPSTREAM` 能接收桥转发的请求格式。缺少字段或格式不正确时，只报告具体缺项并暂停，不要猜测。
-3. 只安装仓库提供的桥、Vision Skill 和 Windows 登录入口。不要编辑 CC Switch SQLite、供应商、模型映射、路由或任何未知路由器配置；这些由我自己完成或确认。
+3. 只安装仓库提供的桥、Vision Skill 和 Windows 登录入口。除非我在配置块中明确选择“自动配置当前活动供应商到 Vision Bridge”，否则不要编辑 CC Switch SQLite、供应商、模型映射、路由或任何未知路由器配置。
 4. 如果是 CC Switch 模式，检查它的开机启动是否已由我开启；如果没有标准登录启动项，只报告，不要替我创建或接管其他启动方式。其他模式跳过 CC Switch 检查。
 5. 按“配置映射”写入视觉模型的三个用户级环境变量和纯文本模型的 `UPSTREAM`。不要把真实文本 Base URL 写成 CC Switch/路由器的最终桥目标，也不要把桥地址写进 `UPSTREAM`。
 6. 如果刚用 `[Environment]::SetEnvironmentVariable(..., "User")` 写入变量，先完成安装再运行已安装的 `restart-vision-bridge.ps1`；它默认使用 `-EnvironmentScope User`，不要把 API Key 放入命令行。该脚本只会停止经过命令行、路径、所有者和启动时间二次确认的本项目旧桥。若这是早于回滚快照功能的旧安装且提示没有受保护快照，只有在确认当前用户环境仍是现有桥配置时，才追加 `-BootstrapRollbackState` 进行一次迁移；如果配置刚改过但旧进程尚未加载，先重启 Windows，不要强行迁移。
-7. 从仓库根目录运行 `npm.cmd run check` 和 `npm.cmd test`，再运行仓库提供的 Windows 安装脚本。CC Switch 模式使用默认安装命令；其他路由器/直连桥模式必须追加 `-SkipCCSwitchStartupCoordination`，即使电脑上安装了 CC Switch 也不要包装它的登录启动项。安装器会把桥运行时、全局 Vision Skill、重启脚本和登录启动入口安装到对应目录，并备份同名旧文件；它不会停止已有桥进程。
+7. 从仓库根目录运行 `npm.cmd run check` 和 `npm.cmd test`，再运行仓库提供的 Windows 安装脚本。CC Switch 手动确认模式使用默认安装命令；CC Switch 自动配置模式追加 `-ConfigureCCSwitchRoute`；其他路由器/直连桥模式必须追加 `-SkipCCSwitchStartupCoordination`，即使电脑上安装了 CC Switch 也不要包装它的登录启动项。安装器会把桥运行时、全局 Vision Skill、重启脚本和登录启动入口安装到对应目录，并备份同名旧文件；自动配置模式会在此后安全重启已验证的旧桥和 CC Switch。
 8. 安装完成后运行已安装的 `restart-vision-bridge.ps1`，让新用户级配置真正加载到桥进程；如果端口由未知进程或不健康桥占用，脚本会保留原状并失败，不要强行停止占用者。只有旧安装缺少回滚快照且当前用户环境确认未变化时，才使用 `-BootstrapRollbackState` 一次建立迁移快照。然后检查 `http://127.0.0.1:15720/health`，健康响应必须包含 `ok=true`、`service=vision-bridge` 和当前受管版本；若设置了 `BRIDGE_AUTH_TOKEN`，请求必须带 `x-bridge-token`。
-9. CC Switch 模式提醒我自己把当前活动供应商目标确认或修改为 `http://127.0.0.1:15720`，并保留 Claude Code 到 CC Switch 的 `http://127.0.0.1:15721`；不要把文本真实上游继续作为最终目标。其他路由器模式提醒我自己确认现有路由器实际指向 `BRIDGE_PORT`；直连桥模式提醒我自己确认 Claude Code 指向 `BRIDGE_PORT`，且 `UPSTREAM` 是兼容 Claude Code 请求格式的上游或适配器。
+9. CC Switch 手动确认模式提醒我自己把当前活动供应商目标确认或修改为 `http://127.0.0.1:15720`；自动配置模式验证脚本已保留 Claude Code 到 CC Switch 的 `http://127.0.0.1:15721`，且当前活动供应商目标已是 `http://127.0.0.1:15720`。两种模式都不得把文本真实上游继续作为 CC Switch 的最终目标。其他路由器模式提醒我自己确认现有路由器实际指向 `BRIDGE_PORT`；直连桥模式提醒我自己确认 Claude Code 指向 `BRIDGE_PORT`，且 `UPSTREAM` 是兼容 Claude Code 请求格式的上游或适配器。
 10. 按当前模式运行诊断：CC Switch 模式使用默认诊断；其他路由器模式使用 `diagnose-vision-bridge.ps1 -SkipCCSwitch -ExpectedRoutePort <现有路由器端口>`，端口未知时使用 `-SkipRouteCheck`；直连桥模式使用 `-SkipCCSwitch`。确认桥和路由链路后，先验证无图片文本请求，再测试粘贴图片和需要时的本地图片路径 Vision Skill。
 11. 让我完成最终粘贴图片测试；如果需要验证开机流程，先向我确认再重启 Windows。重启后登录并等待约 10-30 秒，再直接打开 Claude Code 验证无需手动命令即可识图；不要未经确认自动重启电脑。
 12. 每一步展示实际命令结果和验证证据；失败时保留原配置并说明具体失败层，不要声称“已完成”却没有测试。
@@ -135,7 +139,7 @@ https://github.com/R-R6/claude-deepseek-vision-bridge
 如果配置块中有任何必需字段缺失，请只报告缺少的字段，不要编造或从其他配置猜测。完成后只报告配置是否成功，不要回显任何 API Key。
 ```
 
-如果 AI 遇到以下任一情况，应该暂停并报告，而不是猜测或强行覆盖：真实 `UPSTREAM` 不明、`15720`/`15721` 被未知进程占用、CC Switch 没有标准登录启动项、已配置 `BRIDGE_AUTH_TOKEN` 但 CC Switch 无法注入 `x-bridge-token`，或 CC Switch 更新后启动项指向了不存在的旧路径。AI 也不应为了“让测试通过”把 `UPSTREAM` 改成桥地址、关闭令牌、修改 `input_modalities` 或编辑 CC Switch 数据库。
+如果 AI 遇到以下任一情况，应该暂停并报告，而不是猜测或强行覆盖：真实 `UPSTREAM` 不明、`15720`/`15721` 被未知进程占用、CC Switch 没有标准登录启动项、已配置 `BRIDGE_AUTH_TOKEN` 但 CC Switch 无法注入 `x-bridge-token`，或 CC Switch 更新后启动项指向了不存在的旧路径。AI 也不应为了“让测试通过”把 `UPSTREAM` 改成桥地址、关闭令牌、修改 `input_modalities`，或在未明确选择自动配置模式时编辑 CC Switch 数据库。
 
 ### `15720` 端口冲突时的处理规则
 
@@ -176,7 +180,7 @@ UPSTREAM：          原始 DeepSeek 上游地址（不要改成桥地址）
 
 </details>
 
-这段指令会按所选路由模式配置桥，不会擅自接管 CC Switch 或其他路由器，也不会猜测缺失值或把配置写入仓库。
+这段指令会按所选路由模式和 CC Switch 路由处理模式配置桥，不会擅自接管 CC Switch 或其他路由器，也不会猜测缺失值或把配置写入仓库。
 
 ## Windows 登录后自动启动
 
@@ -186,7 +190,17 @@ UPSTREAM：          原始 DeepSeek 上游地址（不要改成桥地址）
 powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\src\install-vision-bridge.ps1
 ```
 
-安装器会备份并安装桥、Vision Skill 和 Startup 入口；如果已经存在名为 `CC Switch` 的标准用户登录启动项，还会让它等待桥健康后再启动。原始命令和备份保存在 `%USERPROFILE%\.claude\bridge` 下。安装器不会设置环境变量、读取 API Key、编辑 CC Switch 数据库或修改供应商路由。
+安装器会备份并安装桥、Vision Skill 和 Startup 入口；如果已经存在名为 `CC Switch` 的标准用户登录启动项，还会让它等待桥健康后再启动。原始命令和备份保存在 `%USERPROFILE%\.claude\bridge` 下。默认命令不会设置环境变量、读取 API Key、编辑 CC Switch 数据库或修改供应商路由。
+
+已确认当前 CC Switch 活动供应商、`UPSTREAM` 和视觉三项均正确时，可使用全自动 CC Switch 路径：
+
+```powershell
+powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass `
+  -File .\src\install-vision-bridge.ps1 `
+  -ConfigureCCSwitchRoute
+```
+
+该显式开关会先重启并验证桥，再关闭并重启经过名称、路径和当前用户验证的 `cc-switch.exe`，将当前 Claude 供应商的 `settings_config.env.ANTHROPIC_BASE_URL` 更新为桥地址。它不读取、打印或改写文本 API Key、模型和 `UPSTREAM`。写入前会在 `%USERPROFILE%\.claude\bridge\backups` 创建 SQLite 一致性备份；写入或重启失败会恢复该数据库备份。此路径需要 `sqlite3.exe`，或支持 `node:sqlite` 的 Node.js 运行时，且默认只支持 CC Switch 的 `claude`/`claude-desktop` 配置结构。
 
 启动器要求当前进程能看到 `UPSTREAM` 和 `VISION_API_KEY`，并会把错误写入 `%USERPROFILE%\.claude\bridge\vision-bridge.err.log`。设置用户级变量后，重新打开终端、CC Switch 和 Claude Code；要让 Windows 登录启动继承新值，重新登录或重启 Windows。
 
@@ -211,7 +225,7 @@ Claude Code 和 Claude Desktop 可能使用不同的 CC Switch app 类型/供应
 
 CC Switch 是否随 Windows 登录启动仍由其自身设置控制；安装器不会创建或修改这个开关。`15720` 健康但 `15721` 未监听时，检查 `cc-switch-startup.log`；两端口都正常但请求绕过桥时，检查当前 app 类型和活动供应商目标地址。
 
-本项目不在启动时自动编辑 CC Switch 的 SQLite 数据库，也不改供应商、模型映射或路由。它只在安装阶段包装 Windows 注册表中已经存在的 CC Switch 登录启动命令；需要调整路由时先用 CC Switch 界面，并先备份其配置。
+默认安装不编辑 CC Switch 的 SQLite 数据库，也不改供应商、模型映射或路由。使用 `-ConfigureCCSwitchRoute` 时，安装器只会修改已识别当前 Claude 供应商的 Base URL，并执行备份、验证、失败回滚与 CC Switch 重启；它不会创建供应商、更改模型或读取密钥。其他路由器仍必须在其自身界面或受支持的管理接口中配置。
 
 ### 更换文本 DeepSeek 上游
 
@@ -251,7 +265,7 @@ powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass `
 
 按当前模式替换文本 API Key：CC Switch 模式改当前活动供应商，其他路由器模式改现有路由器，直连桥模式改 Claude Code 或协议适配器。不要把它写进 `UPSTREAM`、README、`.env`、命令行或 Git；CC Switch/其他路由器的目标地址仍应是 `http://127.0.0.1:15720`，直连桥模式的 `ANTHROPIC_BASE_URL` 也应指向桥，否则图片请求会绕过桥。修改后先测试文本请求，再测试粘贴图片。
 
-新电脑首次安装时，CC Switch 模式建议先在 CC Switch 中配置并验证真实文本上游，再安装桥并把当前供应商目标改为 `15720`。其他路由器/直连模式可以不安装 CC Switch，但必须先准备兼容的路由或协议适配器。桥不会创建供应商、保存文本 API Key 或编辑 CC Switch 数据库；没有可用路由时只能完成桥文件安装，不能完成最终链路测试。
+新电脑首次安装时，CC Switch 模式建议先在 CC Switch 中配置并验证真实文本上游，再安装桥并把当前供应商目标改为 `15720`；也可在确认前置配置后用 `-ConfigureCCSwitchRoute` 自动完成这一步。其他路由器/直连模式可以不安装 CC Switch，但必须先准备兼容的路由或协议适配器。桥不会创建供应商、保存文本 API Key；没有可用路由时只能完成桥文件安装，不能完成最终链路测试。
 
 ### CC Switch 更新后的检查
 

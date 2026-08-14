@@ -20,6 +20,16 @@ function trace(message) {
   }
 }
 
+function traceDuration(label, startedAt) {
+  trace(`${label} completed in ${Date.now() - startedAt} ms`);
+}
+
+function assertSpawnCompleted(result, label) {
+  if (result.error) {
+    throw new Error(`${label} did not complete: ${result.error.message}`);
+  }
+}
+
 function listen(server) {
   return new Promise((resolve) => server.listen(0, "127.0.0.1", () => resolve(server.address().port)));
 }
@@ -179,7 +189,8 @@ function createBundle(homeDir) {
 
 function runLauncher(homeDir, port, extraEnv = {}) {
   const launcher = path.join(homeDir, ".claude", "bridge", "start-vision-bridge.ps1");
-  return spawnSync(powershell, [
+  const startedAt = Date.now();
+  const child = spawn(powershell, [
     "-NoLogo",
     "-NoProfile",
     "-ExecutionPolicy",
@@ -199,13 +210,49 @@ function runLauncher(homeDir, port, extraEnv = {}) {
       BRIDGE_STARTUP_TIMEOUT_MS: "30000",
       ...extraEnv,
     },
-    encoding: "utf8",
-    timeout: 60000,
+    windowsHide: true,
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  let stdout = "";
+  let stderr = "";
+  child.stdout.setEncoding("utf8");
+  child.stderr.setEncoding("utf8");
+
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const finish = (result, terminateLauncher = false) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (terminateLauncher && child.exitCode === null) child.kill();
+      traceDuration("launcher", startedAt);
+      resolve(result);
+    };
+    const timer = setTimeout(() => {
+      if (child.exitCode === null) child.kill();
+      reject(new Error(`launcher did not report a terminal result within 15000 ms: ${stdout}\n${stderr}`));
+    }, 15000);
+    child.stdout.on("data", (chunk) => {
+      stdout += chunk;
+      if (/Vision Bridge (?:started and passed health check|is already healthy)/.test(stdout)) {
+        // The bridge is an independent child process. The test only needs the launcher result.
+        finish({ status: 0, stdout, stderr }, true);
+      }
+    });
+    child.stderr.on("data", (chunk) => { stderr += chunk; });
+    child.on("error", (error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      reject(error);
+    });
+    child.on("close", (status, signal) => finish({ status, signal, stdout, stderr }));
   });
 }
 
 function runRestart(homeDir, port, upstream, extraEnv = {}, extraArgs = []) {
-  return spawnSync(powershell, [
+  const startedAt = Date.now();
+  const result = spawnSync(powershell, [
     "-NoLogo",
     "-NoProfile",
     "-ExecutionPolicy",
@@ -229,8 +276,12 @@ function runRestart(homeDir, port, upstream, extraEnv = {}, extraArgs = []) {
       ...extraEnv,
     },
     encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
     timeout: 60000,
   });
+  assertSpawnCompleted(result, "restart");
+  traceDuration("restart", startedAt);
+  return result;
 }
 
 function runDiagnostic(homeDir, port, options = {}) {
@@ -245,7 +296,8 @@ function runDiagnostic(homeDir, port, options = {}) {
     diagnosticArgs.push("-ExpectedRoutePort", String(options.expectedRoutePort));
   }
   if (options.skipRouteCheck) diagnosticArgs.push("-SkipRouteCheck");
-  return spawnSync(powershell, [
+  const startedAt = Date.now();
+  const result = spawnSync(powershell, [
     "-NoLogo",
     "-NoProfile",
     "-ExecutionPolicy",
@@ -266,6 +318,8 @@ function runDiagnostic(homeDir, port, options = {}) {
     encoding: "utf8",
     timeout: 10000,
   });
+  traceDuration("diagnostic", startedAt);
+  return result;
 }
 
 function runDiagnosticWithOutput(homeDir, port, options = {}) {
@@ -292,7 +346,8 @@ function createVisionMock(description) {
 }
 
 function runInstaller(homeDir, startupDir, extraArgs = []) {
-  return spawnSync(powershell, [
+  const startedAt = Date.now();
+  const result = spawnSync(powershell, [
     "-NoLogo",
     "-NoProfile",
     "-ExecutionPolicy",
@@ -305,6 +360,8 @@ function runInstaller(homeDir, startupDir, extraArgs = []) {
     startupDir,
     ...extraArgs,
   ], { encoding: "utf8", timeout: 15000 });
+  traceDuration("installer", startedAt);
+  return result;
 }
 
 function setRegistryValue(keyPath, valueName, value) {
@@ -366,7 +423,8 @@ function removeRegistryKey(keyPath) {
 }
 
 function runRestore(homeDir, keyPath) {
-  return spawnSync(powershell, [
+  const startedAt = Date.now();
+  const result = spawnSync(powershell, [
     "-NoLogo",
     "-NoProfile",
     "-ExecutionPolicy",
@@ -378,11 +436,14 @@ function runRestore(homeDir, keyPath) {
     "-CCSwitchRunKeyPath",
     keyPath,
   ], { encoding: "utf8", timeout: 15000 });
+  traceDuration("startup restore", startedAt);
+  return result;
 }
 
 function runStartupVbs(homeDir, startupDir, port) {
   const cscript = path.join(process.env.SystemRoot || "C:\\Windows", "System32", "cscript.exe");
-  return spawnSync(cscript, ["//nologo", path.join(startupDir, "vision-bridge.vbs")], {
+  const startedAt = Date.now();
+  const result = spawnSync(cscript, ["//nologo", path.join(startupDir, "vision-bridge.vbs")], {
     env: {
       ...process.env,
       USERPROFILE: homeDir,
@@ -397,6 +458,8 @@ function runStartupVbs(homeDir, startupDir, port) {
     encoding: "utf8",
     timeout: 5000,
   });
+  traceDuration("startup vbs", startedAt);
+  return result;
 }
 
 function runCCSwitchCoordinator(homeDir, port, timeoutMs = 5000) {
@@ -682,6 +745,8 @@ async function main() {
       ".claude/bridge/start-ccswitch-after-bridge.vbs",
       ".claude/bridge/restore-ccswitch-startup.ps1",
       ".claude/bridge/diagnose-vision-bridge.ps1",
+      ".claude/bridge/configure-ccswitch-route.ps1",
+      ".claude/bridge/cc-switch-sqlite.js",
       ".claude/skills/vision/vision.js",
       ".claude/skills/vision/vision-client.js",
       ".claude/skills/vision/SKILL.md",
@@ -744,7 +809,7 @@ async function main() {
     fs.rmSync(noCCSwitchRoot, { recursive: true, force: true });
 
     createBundle(normal.root);
-    const normalResult = runLauncher(normal.root, normal.port);
+    const normalResult = await runLauncher(normal.root, normal.port);
     assert.equal(normalResult.status, 0, `${normalResult.stdout}\n${normalResult.stderr}`);
     assert.match(normalResult.stdout, /passed health check/);
     const normalHealth = await getJson(normal.port, "/health", { "x-bridge-token": "startup-test-token" });
@@ -753,7 +818,7 @@ async function main() {
     await stopOwnedProcesses(normal.root);
 
     createBundle(restartCase.root);
-    const oldStart = runLauncher(restartCase.root, restartCase.port, {
+    const oldStart = await runLauncher(restartCase.root, restartCase.port, {
       UPSTREAM: "http://127.0.0.1:" + upstreamOldPort + "/v1",
       VISION_BASE_URL: "http://127.0.0.1:" + visionOldPort + "/v1",
     });
@@ -884,7 +949,7 @@ async function main() {
     assert.match(JSON.stringify(upstreamNew.payloads.at(-1)), /restart-new-vision-description/);
     trace("rollback request passed");
     createBundle(diagnosticCase.root);
-    const diagnosticStart = runLauncher(diagnosticCase.root, diagnosticCase.port);
+    const diagnosticStart = await runLauncher(diagnosticCase.root, diagnosticCase.port);
     assert.equal(diagnosticStart.status, 0, diagnosticStart.stdout + "\n" + diagnosticStart.stderr);
     const diagnosticPass = runDiagnosticWithOutput(diagnosticCase.root, diagnosticCase.port, { expectPass: true });
     assert.match(diagnosticPass.stdout, /Required process configuration/);
@@ -909,7 +974,7 @@ async function main() {
       res.end(JSON.stringify({ ok: true, service: "vision-bridge", version: "0.2.1" }));
     });
     occupied.port = await listen(occupiedServer);
-    const occupiedResult = runLauncher(occupied.root, occupied.port);
+    const occupiedResult = await runLauncher(occupied.root, occupied.port);
     assert.notEqual(occupiedResult.status, 0);
     assert.match(
       `${occupiedResult.stdout}\n${occupiedResult.stderr}`,
@@ -945,7 +1010,7 @@ async function main() {
       '  res.end("ok");',
       '}).listen(port, "127.0.0.1");',
     ].join("\n"));
-    const delayedResult = runLauncher(delayed.root, delayed.port, { BRIDGE_STARTUP_TIMEOUT_MS: "1000" });
+    const delayedResult = await runLauncher(delayed.root, delayed.port, { BRIDGE_STARTUP_TIMEOUT_MS: "1000" });
     assert.notEqual(delayedResult.status, 0);
     assert.match(
       `${delayedResult.stdout}\n${delayedResult.stderr}`,

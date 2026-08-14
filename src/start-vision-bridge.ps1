@@ -307,6 +307,8 @@ try {
             } else {
                 Write-Warning "Vision Bridge started on port $port, but its protected rollback state was not saved. Restart Windows before changing bridge configuration."
             }
+            $bridgeProcess.Dispose()
+            $bridgeProcess = $null
             exit 0
         }
         if ($bridgeProcess.HasExited) {

@@ -4,7 +4,8 @@ param(
     [string]$StartupDirectory = [Environment]::GetFolderPath("Startup"),
     [string]$CCSwitchRunValueName = "CC Switch",
     [string]$CCSwitchRunKeyPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run",
-    [switch]$SkipCCSwitchStartupCoordination
+    [switch]$SkipCCSwitchStartupCoordination,
+    [switch]$ConfigureCCSwitchRoute
 )
 
 $ErrorActionPreference = "Stop"
@@ -53,6 +54,16 @@ $sourceItems = @(
     [pscustomobject]@{
         Source = Join-Path $sourceDir "diagnose-vision-bridge.ps1"
         Destination = Join-Path $bridgeDir "diagnose-vision-bridge.ps1"
+        Label = "bridge"
+    }
+    [pscustomobject]@{
+        Source = Join-Path $sourceDir "configure-ccswitch-route.ps1"
+        Destination = Join-Path $bridgeDir "configure-ccswitch-route.ps1"
+        Label = "bridge"
+    }
+    [pscustomobject]@{
+        Source = Join-Path $sourceDir "cc-switch-sqlite.js"
+        Destination = Join-Path $bridgeDir "cc-switch-sqlite.js"
         Label = "bridge"
     }
     [pscustomobject]@{
@@ -269,4 +280,13 @@ try {
     if (Test-Path -LiteralPath $stagingRoot) {
         Remove-Item -LiteralPath $stagingRoot -Recurse -Force
     }
+}
+
+if ($ConfigureCCSwitchRoute) {
+    $installedRestartScript = Join-Path $bridgeDir "restart-vision-bridge.ps1"
+    $installedRouteScript = Join-Path $bridgeDir "configure-ccswitch-route.ps1"
+    Write-Output "Starting the Vision Bridge before updating the active CC Switch provider route."
+    & $installedRestartScript -EnvironmentScope User
+    Write-Output "Updating the active CC Switch provider route with a reversible database backup."
+    & $installedRouteScript -ForceCloseCCSwitch
 }
