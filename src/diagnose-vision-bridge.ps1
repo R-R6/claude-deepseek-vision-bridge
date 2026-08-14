@@ -1,6 +1,10 @@
 [CmdletBinding()]
 param(
-    [int]$CCSwitchPort = 15721
+    [int]$CCSwitchPort = 15721,
+    [switch]$SkipCCSwitch,
+    [ValidateRange(0, 65535)]
+    [int]$ExpectedRoutePort = 0,
+    [switch]$SkipRouteCheck
 )
 
 $ErrorActionPreference = "SilentlyContinue"
@@ -59,8 +63,12 @@ if ($bridgePortValid) {
     }
 }
 
-$ccSwitchConnections = @(Get-NetTCPConnection -State Listen -LocalPort $CCSwitchPort)
-$ccSwitchListening = $ccSwitchConnections.Count -gt 0
+$ccSwitchConnections = @()
+$ccSwitchListening = $false
+if (-not $SkipCCSwitch) {
+    $ccSwitchConnections = @(Get-NetTCPConnection -State Listen -LocalPort $CCSwitchPort)
+    $ccSwitchListening = $ccSwitchConnections.Count -gt 0
+}
 
 $claudeSettingsPath = Join-Path $env:USERPROFILE ".claude\settings.json"
 $claudeBaseUrl = ""
@@ -72,22 +80,26 @@ if (Test-Path -LiteralPath $claudeSettingsPath -PathType Leaf) {
         $claudeBaseUrl = "[unreadable]"
     }
 }
+$expectedRoutePort = if ($SkipCCSwitch) { $bridgePort } else { $CCSwitchPort }
+$expectedRoutePort = if ($ExpectedRoutePort -gt 0) { $ExpectedRoutePort } else { $expectedRoutePort }
 $routeMatchesProxy = $false
 $safeClaudeBaseUrl = "[missing]"
-try {
-    $routeUri = [Uri]$claudeBaseUrl
-    $routeMatchesProxy = $routeUri.Host -eq "127.0.0.1" -and $routeUri.Port -eq $CCSwitchPort
-    $safeClaudeBaseUrl = "{0}://{1}:{2}" -f $routeUri.Scheme, $routeUri.Host, $routeUri.Port
-} catch {
-    $routeMatchesProxy = $false
-    if ($claudeBaseUrl) {
-        $safeClaudeBaseUrl = "[invalid-url]"
+if (-not $SkipRouteCheck) {
+    try {
+        $routeUri = [Uri]$claudeBaseUrl
+        $routeMatchesProxy = $routeUri.Host -eq "127.0.0.1" -and $routeUri.Port -eq $expectedRoutePort
+        $safeClaudeBaseUrl = "{0}://{1}:{2}" -f $routeUri.Scheme, $routeUri.Host, $routeUri.Port
+    } catch {
+        $routeMatchesProxy = $false
+        if ($claudeBaseUrl) {
+            $safeClaudeBaseUrl = "[invalid-url]"
+        }
     }
 }
 
 $ccSwitchSettingsPath = Join-Path $env:USERPROFILE ".cc-switch\settings.json"
 $ccSwitchLaunchOnStartup = "unknown"
-if (Test-Path -LiteralPath $ccSwitchSettingsPath -PathType Leaf) {
+if (-not $SkipCCSwitch -and (Test-Path -LiteralPath $ccSwitchSettingsPath -PathType Leaf)) {
     try {
         $ccSwitchSettings = Get-Content -Raw -Encoding UTF8 -LiteralPath $ccSwitchSettingsPath | ConvertFrom-Json
         if ($ccSwitchSettings.launchOnStartup -eq $true) {
@@ -100,6 +112,19 @@ if (Test-Path -LiteralPath $ccSwitchSettingsPath -PathType Leaf) {
     }
 }
 
+$upstream = Get-ProcessSetting "UPSTREAM"
+$upstreamValid = $false
+try {
+    $upstreamUri = [Uri]$upstream
+    $upstreamValid = $upstreamUri.Scheme -in @("http", "https") -and
+        -not [string]::IsNullOrWhiteSpace($upstreamUri.Host)
+    if ($upstreamValid -and $upstreamUri.Host -match "(?i)^(localhost|127(?:\.\d{1,3}){3}|::1)$") {
+        $upstreamValid = $upstreamUri.Port -ne $bridgePort
+    }
+} catch {
+    $upstreamValid = $false
+}
+
 Write-Output "Vision Bridge / CC Switch diagnostic (read-only)"
 [pscustomobject]@{
     Check = "Bridge health"
@@ -108,27 +133,35 @@ Write-Output "Vision Bridge / CC Switch diagnostic (read-only)"
 } | Format-Table -AutoSize
 [pscustomobject]@{
     Check = "CC Switch local proxy"
-    Status = if ($ccSwitchListening) { "PASS" } else { "FAIL" }
-    Detail = "127.0.0.1:$CCSwitchPort listening=$ccSwitchListening"
+    Status = if ($SkipCCSwitch) { "SKIP" } elseif ($ccSwitchListening) { "PASS" } else { "FAIL" }
+    Detail = if ($SkipCCSwitch) { "skipped by -SkipCCSwitch" } else { "127.0.0.1:$CCSwitchPort listening=$ccSwitchListening" }
 } | Format-Table -AutoSize
 [pscustomobject]@{
-    Check = "Claude Code route"
-    Status = if ($routeMatchesProxy) { "PASS" } else { "WARN" }
-    Detail = "ANTHROPIC_BASE_URL=$safeClaudeBaseUrl"
+    Check = if ($SkipCCSwitch) { "Claude Code route to bridge" } else { "Claude Code route to CC Switch" }
+    Status = if ($SkipRouteCheck) { "SKIP" } elseif ($routeMatchesProxy) { "PASS" } else { "WARN" }
+    Detail = if ($SkipRouteCheck) {
+        "route check skipped; verify the active router points to the bridge port"
+    } else {
+        "ANTHROPIC_BASE_URL=$safeClaudeBaseUrl; expected 127.0.0.1:$expectedRoutePort"
+    }
 } | Format-Table -AutoSize
 [pscustomobject]@{
     Check = "CC Switch login startup"
-    Status = if ($ccSwitchLaunchOnStartup -eq "enabled") { "PASS" } else { "WARN" }
-    Detail = $ccSwitchLaunchOnStartup
+    Status = if ($SkipCCSwitch) { "SKIP" } elseif ($ccSwitchLaunchOnStartup -eq "enabled") { "PASS" } else { "WARN" }
+    Detail = if ($SkipCCSwitch) { "skipped by -SkipCCSwitch" } else { $ccSwitchLaunchOnStartup }
 } | Format-Table -AutoSize
 [pscustomobject]@{
     Check = "Required process configuration"
-    Status = if ($bridgePortValid -and (Get-ProcessSetting "UPSTREAM") -and (Get-ProcessSetting "VISION_API_KEY")) { "PASS" } else { "FAIL" }
-    Detail = "values are checked for presence only; no secret is displayed"
+    Status = if ($bridgePortValid -and $upstreamValid -and (Get-ProcessSetting "VISION_API_KEY")) { "PASS" } else { "FAIL" }
+    Detail = "UPSTREAM URL and required secret presence are checked; no secret or URL value is displayed"
 } | Format-Table -AutoSize
 
-Write-Output "If Bridge health fails, repair the bridge bundle/startup entry first. If Bridge passes but CC Switch fails, start CC Switch. If both pass but requests bypass the bridge, inspect the active CC Switch app profile and provider target in its UI; this script never edits SQLite."
+if ($SkipCCSwitch) {
+    Write-Output "CC Switch checks were skipped. Configure the actual router so requests reach the bridge port; this script never edits router configuration. Use -ExpectedRoutePort for a known Claude Code router port, or -SkipRouteCheck when that port is not known."
+} else {
+    Write-Output "If Bridge health fails, repair the bridge bundle/startup entry first. If Bridge passes but CC Switch fails, start CC Switch. If both pass but requests bypass the bridge, inspect the active CC Switch app profile and provider target in its UI; this script never edits SQLite."
+}
 
-if (-not $bridgeHealth -or -not $ccSwitchListening -or -not $bridgePortValid) {
+if (-not $bridgeHealth -or (-not $SkipCCSwitch -and -not $ccSwitchListening) -or -not $bridgePortValid) {
     exit 1
 }

@@ -5,6 +5,31 @@ $bridgeScript = Join-Path $bridgeDir "vision-bridge.js"
 $clientScript = Join-Path $bridgeDir "vision-client.js"
 $logPath = Join-Path $bridgeDir "vision-bridge.log"
 $errorLogPath = Join-Path $bridgeDir "vision-bridge.err.log"
+$rollbackStatePath = Join-Path $bridgeDir "bridge-rollback-state.dat"
+$rollbackEnvironmentNames = @(
+    "UPSTREAM",
+    "VISION_API_KEY",
+    "VISION_BASE_URL",
+    "VISION_MODEL",
+    "VISION_PROMPT",
+    "VISION_TIMEOUT_MS",
+    "VISION_MAX_RESPONSE_BYTES",
+    "BRIDGE_HOST",
+    "BRIDGE_PORT",
+    "BRIDGE_AUTH_TOKEN",
+    "BRIDGE_MAX_BODY_BYTES",
+    "BRIDGE_MAX_IMAGES",
+    "BRIDGE_MAX_CONCURRENT_VISION_REQUESTS",
+    "BRIDGE_MAX_VISION_JOBS",
+    "UPSTREAM_TIMEOUT_MS",
+    "BRIDGE_HEADERS_TIMEOUT_MS",
+    "BRIDGE_BODY_TIMEOUT_MS",
+    "BRIDGE_TOTAL_REQUEST_TIMEOUT_MS",
+    "BRIDGE_KEEP_ALIVE_TIMEOUT_MS",
+    "BRIDGE_STARTUP_TIMEOUT_MS",
+    "BRIDGE_STARTUP_COORDINATOR_TIMEOUT_MS",
+    "ALLOW_INSECURE_HTTP"
+)
 $expectedVersion = "0.2.1"
 $bridgeProcess = $null
 
@@ -27,6 +52,38 @@ function Get-ProcessSetting {
     return [Environment]::GetEnvironmentVariable($Name, "Process")
 }
 
+function Save-RollbackSnapshot {
+    param([Parameter(Mandatory = $true)][object]$Settings)
+
+    $temporaryPath = "$rollbackStatePath.$PID.tmp"
+    try {
+        $snapshot = [ordered]@{}
+        foreach ($name in $rollbackEnvironmentNames) {
+            $snapshot[$name] = Get-ProcessSetting -Name $name
+        }
+        $snapshot["BRIDGE_HOST"] = $Settings.Host
+        $snapshot["BRIDGE_PORT"] = [string]$Settings.Port
+        $snapshot["BRIDGE_STARTUP_TIMEOUT_MS"] = [string]$Settings.StartupTimeoutMs
+        $json = $snapshot | ConvertTo-Json -Compress
+        $secureSnapshot = ConvertTo-SecureString -String $json -AsPlainText -Force
+        $encryptedSnapshot = ConvertFrom-SecureString -SecureString $secureSnapshot
+        Set-Content -LiteralPath $temporaryPath -Value $encryptedSnapshot -Encoding ASCII -Force
+        Move-Item -LiteralPath $temporaryPath -Destination $rollbackStatePath -Force
+        return $true
+    } catch {
+        try {
+            Add-Content -LiteralPath $errorLogPath -Value "$(Get-Date -Format o) ROLLBACK-STATE-WARN unable to save protected rollback state"
+        } catch {
+            # The bridge is already healthy; a missing rollback snapshot must not stop it.
+        }
+        return $false
+    } finally {
+        if (Test-Path -LiteralPath $temporaryPath) {
+            Remove-Item -LiteralPath $temporaryPath -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
 function Get-ProcessOwnerDescription {
     param([Parameter(Mandatory = $true)][int]$ProcessId)
 
@@ -37,6 +94,81 @@ function Get-ProcessOwnerDescription {
     $name = if ($processInfo.Name) { $processInfo.Name } else { "[name unavailable]" }
     $path = if ($processInfo.ExecutablePath) { $processInfo.ExecutablePath } else { "[path unavailable]" }
     return "$ProcessId $name $path"
+}
+
+function Get-CurrentOwnerKey {
+    return [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+}
+
+function Convert-OwnerToSid {
+    param(
+        [Parameter(Mandatory = $true)][string]$Domain,
+        [Parameter(Mandatory = $true)][string]$User
+    )
+
+    $account = New-Object System.Security.Principal.NTAccount($Domain, $User)
+    return $account.Translate([Security.Principal.SecurityIdentifier]).Value
+}
+
+function Test-ScriptArgument {
+    param(
+        [Parameter(Mandatory = $true)][string]$CommandLine,
+        [Parameter(Mandatory = $true)][string]$ScriptPath
+    )
+
+    $normalizedCommandLine = $CommandLine.Replace("/", "\")
+    $normalizedScriptPath = $ScriptPath.Replace("/", "\")
+    $pattern = '(?i)(^|[\s"])' + [Regex]::Escape($normalizedScriptPath) + '(["\s]|$)'
+    return $normalizedCommandLine -match $pattern
+}
+
+function Test-ManagedBridgeProcess {
+    param(
+        [Parameter(Mandatory = $true)][int]$ProcessId,
+        [Parameter(Mandatory = $true)][string]$ScriptPath
+    )
+
+    try {
+        $cimProcess = Get-CimInstance Win32_Process -Filter "ProcessId=$ProcessId" -ErrorAction Stop
+        if ($null -eq $cimProcess -or
+            [string]::IsNullOrWhiteSpace($cimProcess.CommandLine) -or
+            -not (Test-ScriptArgument -CommandLine $cimProcess.CommandLine -ScriptPath $ScriptPath) -or
+            [string]::IsNullOrWhiteSpace($cimProcess.ExecutablePath) -or
+            [IO.Path]::GetFileName($cimProcess.ExecutablePath) -ine "node.exe") {
+            return $false
+        }
+
+        $owner = Invoke-CimMethod -InputObject $cimProcess -MethodName GetOwner -ErrorAction Stop
+        if ($owner.ReturnValue -ne 0 -or
+            [string]::IsNullOrWhiteSpace($owner.User) -or
+            [string]::IsNullOrWhiteSpace($owner.Domain)) {
+            return $false
+        }
+        return (Convert-OwnerToSid -Domain $owner.Domain -User $owner.User) -eq (Get-CurrentOwnerKey)
+    } catch {
+        return $false
+    }
+}
+
+function Get-ManagedListenerStatus {
+    param(
+        [Parameter(Mandatory = $true)][int]$Port,
+        [Parameter(Mandatory = $true)][string]$ScriptPath
+    )
+
+    $connections = @(Get-NetTCPConnection -State Listen -LocalPort $Port -ErrorAction SilentlyContinue)
+    $owners = @($connections | Select-Object -ExpandProperty OwningProcess -Unique)
+    $unmanaged = @()
+    foreach ($owner in $owners) {
+        if (-not (Test-ManagedBridgeProcess -ProcessId ([int]$owner) -ScriptPath $ScriptPath)) {
+            $unmanaged += Get-ProcessOwnerDescription -ProcessId ([int]$owner)
+        }
+    }
+    return [pscustomobject]@{
+        Listening = $owners.Count -gt 0
+        Managed = $owners.Count -gt 0 -and $unmanaged.Count -eq 0
+        Details = ($unmanaged -join "; ")
+    }
 }
 
 function Stop-StartedBridge {
@@ -135,16 +267,16 @@ try {
         }
     }
 
-    if (Test-BridgeHealth) {
-        Write-Output "Vision Bridge is already healthy on port $port."
-        exit 0
-    }
-
-    $existing = @(Get-NetTCPConnection -State Listen -LocalPort $port -ErrorAction SilentlyContinue)
-    if ($existing.Count -gt 0) {
-        $owners = @($existing | Select-Object -ExpandProperty OwningProcess -Unique)
-        $ownerDetails = ($owners | ForEach-Object { Get-ProcessOwnerDescription -ProcessId ([int]$_) }) -join "; "
-        throw "Port $port is already in use by a process that is not a healthy Vision Bridge version; refusing to stop owners: $ownerDetails."
+    $listenerStatus = Get-ManagedListenerStatus -Port $port -ScriptPath $bridgeScript
+    if ($listenerStatus.Listening) {
+        if (-not $listenerStatus.Managed) {
+            throw "Port $port is already in use by a process that is not the installed Vision Bridge; refusing to stop or reuse owners: $($listenerStatus.Details)."
+        }
+        if (Test-BridgeHealth) {
+            Write-Output "Vision Bridge is already healthy on port $port."
+            exit 0
+        }
+        throw "A managed Vision Bridge process is listening on port $port but did not pass the health check; refusing to start another process."
     }
 
     New-Item -ItemType Directory -Force -Path $bridgeDir | Out-Null
@@ -160,7 +292,16 @@ try {
 
     $deadline = [DateTime]::UtcNow.AddMilliseconds($startupTimeoutMs)
     while ([DateTime]::UtcNow -lt $deadline) {
-        if (Test-BridgeHealth) {
+        $listenerStatus = Get-ManagedListenerStatus -Port $port -ScriptPath $bridgeScript
+        if ($listenerStatus.Listening -and -not $listenerStatus.Managed) {
+            throw "Port $port became occupied by a process that is not the installed Vision Bridge; refusing to reuse it: $($listenerStatus.Details)."
+        }
+        if ($listenerStatus.Managed -and (Test-BridgeHealth)) {
+            $null = Save-RollbackSnapshot -Settings ([pscustomobject]@{
+                Host = $hostName
+                Port = $port
+                StartupTimeoutMs = $startupTimeoutMs
+            })
             Write-Output "Vision Bridge started and passed health check on port $port. Logs: $logPath"
             exit 0
         }

@@ -24,8 +24,47 @@ function listen(server) {
   return new Promise((resolve) => server.listen(0, "127.0.0.1", () => resolve(server.address().port)));
 }
 
-function close(server) {
-  return new Promise((resolve) => server.close(resolve));
+function listenAt(server, port) {
+  return new Promise((resolve, reject) => {
+    const onError = (error) => {
+      server.removeListener("listening", onListening);
+      reject(error);
+    };
+    const onListening = () => {
+      server.removeListener("error", onError);
+      resolve(server.address().port);
+    };
+    server.once("error", onError);
+    server.once("listening", onListening);
+    server.listen(port, "127.0.0.1");
+  });
+}
+
+function close(server, timeoutMs = 5000) {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (typeof server.closeAllConnections === "function") {
+        trace("forcing mock server connections closed");
+        server.closeAllConnections();
+        return;
+      }
+      finish(reject, new Error("mock server did not close within " + timeoutMs + " ms"));
+    }, timeoutMs);
+    const finish = (callback, value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      callback(value);
+    };
+    server.close((error) => {
+      if (error && error.code !== "ERR_SERVER_NOT_RUNNING") {
+        finish(reject, error);
+        return;
+      }
+      finish(resolve);
+    });
+  });
 }
 
 function getJson(port, urlPath, headers = {}) {
@@ -36,7 +75,7 @@ function getJson(port, urlPath, headers = {}) {
       settled = true;
       callback(value);
     };
-    const request = http.get({ host: "127.0.0.1", port, path: urlPath, headers }, (res) => {
+    const request = http.get({ host: "127.0.0.1", port, path: urlPath, headers, agent: false }, (res) => {
       let body = "";
       res.setEncoding("utf8");
       res.on("data", (chunk) => { body += chunk; });
@@ -59,6 +98,65 @@ function getJson(port, urlPath, headers = {}) {
   });
 }
 
+function postJson(port, urlPath, payload, headers = {}) {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const finish = (callback, value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      callback(value);
+    };
+    const body = JSON.stringify(payload);
+    const requestHeaders = {
+      "content-type": "application/json",
+      "content-length": Buffer.byteLength(body),
+      ...headers,
+    };
+    const request = http.request({
+      host: "127.0.0.1",
+      port,
+      path: urlPath,
+      method: "POST",
+      headers: requestHeaders,
+      agent: false,
+    }, (response) => {
+      let responseBody = "";
+      response.setEncoding("utf8");
+      response.on("data", (chunk) => { responseBody += chunk; });
+      response.on("error", (error) => {
+        finish(reject, new Error(`POST ${urlPath} response failed: ${error.message}`, { cause: error }));
+      });
+      response.on("aborted", () => {
+        finish(reject, new Error(`POST ${urlPath} response aborted`));
+      });
+      response.on("close", () => {
+        if (!response.complete) {
+          finish(reject, new Error(`POST ${urlPath} response closed before completion`));
+        }
+      });
+      response.on("end", () => {
+        let parsed;
+        try {
+          parsed = JSON.parse(responseBody);
+        } catch {
+          parsed = responseBody;
+        }
+        finish(resolve, { status: response.statusCode, body: parsed });
+      });
+    });
+    request.on("error", (error) => {
+      finish(reject, new Error(`POST ${urlPath} request failed: ${error.message}`, { cause: error }));
+    });
+    const timer = setTimeout(() => {
+      const error = new Error(`POST ${urlPath} timed out`);
+      request.destroy(error);
+      finish(reject, error);
+    }, 5000);
+    request.end(body);
+  });
+}
+
 function freePort() {
   const probe = http.createServer();
   return listen(probe).then((port) => close(probe).then(() => port));
@@ -71,6 +169,7 @@ function createBundle(homeDir) {
     "vision-bridge.js",
     "vision-client.js",
     "start-vision-bridge.ps1",
+    "restart-vision-bridge.ps1",
     "start-ccswitch-after-bridge.vbs",
   ]) {
     fs.copyFileSync(path.join(sourceDir, name), path.join(bridgeDir, name));
@@ -97,12 +196,99 @@ function runLauncher(homeDir, port, extraEnv = {}) {
       UPSTREAM: "http://127.0.0.1:1/v1",
       VISION_BASE_URL: "http://127.0.0.1:1/v1",
       VISION_API_KEY: "startup-test-key",
-      BRIDGE_STARTUP_TIMEOUT_MS: "5000",
+      BRIDGE_STARTUP_TIMEOUT_MS: "30000",
       ...extraEnv,
     },
     encoding: "utf8",
-    timeout: 15000,
+    timeout: 60000,
   });
+}
+
+function runRestart(homeDir, port, upstream, extraEnv = {}, extraArgs = []) {
+  return spawnSync(powershell, [
+    "-NoLogo",
+    "-NoProfile",
+    "-ExecutionPolicy",
+    "Bypass",
+    "-File",
+    path.join(homeDir, ".claude", "bridge", "restart-vision-bridge.ps1"),
+    "-EnvironmentScope",
+    "Process",
+    ...extraArgs,
+  ], {
+    env: {
+      ...process.env,
+      USERPROFILE: homeDir,
+      BRIDGE_HOST: "127.0.0.1",
+      BRIDGE_PORT: String(port),
+      BRIDGE_AUTH_TOKEN: "startup-test-token",
+      UPSTREAM: upstream,
+      VISION_BASE_URL: "http://127.0.0.1:1/v1",
+      VISION_API_KEY: "startup-test-key",
+      BRIDGE_STARTUP_TIMEOUT_MS: "30000",
+      ...extraEnv,
+    },
+    encoding: "utf8",
+    timeout: 60000,
+  });
+}
+
+function runDiagnostic(homeDir, port, options = {}) {
+  const routePort = options.routePort ?? port;
+  const settingsPath = path.join(homeDir, ".claude", "settings.json");
+  fs.mkdirSync(path.dirname(settingsPath), { recursive: true });
+  fs.writeFileSync(settingsPath, JSON.stringify({
+    env: { ANTHROPIC_BASE_URL: "http://127.0.0.1:" + routePort },
+  }), "utf8");
+  const diagnosticArgs = ["-SkipCCSwitch"];
+  if (Number.isInteger(options.expectedRoutePort)) {
+    diagnosticArgs.push("-ExpectedRoutePort", String(options.expectedRoutePort));
+  }
+  if (options.skipRouteCheck) diagnosticArgs.push("-SkipRouteCheck");
+  return spawnSync(powershell, [
+    "-NoLogo",
+    "-NoProfile",
+    "-ExecutionPolicy",
+    "Bypass",
+    "-File",
+    path.join(sourceDir, "diagnose-vision-bridge.ps1"),
+    ...diagnosticArgs,
+  ], {
+    env: {
+      ...process.env,
+      USERPROFILE: homeDir,
+      BRIDGE_HOST: "127.0.0.1",
+      BRIDGE_PORT: String(port),
+      BRIDGE_AUTH_TOKEN: "startup-test-token",
+      UPSTREAM: "https://new.example/v1",
+      VISION_API_KEY: "startup-test-key",
+    },
+    encoding: "utf8",
+    timeout: 10000,
+  });
+}
+
+function runDiagnosticWithOutput(homeDir, port, options = {}) {
+  const result = runDiagnostic(homeDir, port, options);
+  if (options.expectPass) {
+    assert.equal(result.status, 0, result.stdout + "\n" + result.stderr);
+  } else {
+    assert.notEqual(result.status, 0, result.stdout + "\n" + result.stderr);
+  }
+  return result;
+}
+
+function createVisionMock(description) {
+  const mock = { requests: 0, server: null };
+  mock.server = http.createServer((req, res) => {
+    mock.requests += 1;
+    req.resume();
+    req.on("end", () => {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ choices: [{ message: { content: description } }] }));
+    });
+  });
+  return mock;
 }
 
 function runInstaller(homeDir, startupDir, extraArgs = []) {
@@ -151,6 +337,21 @@ function getRegistryValue(keyPath, valueName) {
     timeout: 5000,
   });
   assert.equal(result.status, 0, "cannot read test registry value");
+  return result.stdout.trim();
+}
+
+function getRegistryValueOrEmpty(keyPath, valueName) {
+  const command = "if (Test-Path -LiteralPath $env:TEST_REGISTRY_KEY) { ([string](Get-ItemProperty -LiteralPath $env:TEST_REGISTRY_KEY).$env:TEST_REGISTRY_NAME) }";
+  const result = spawnSync(powershell, ["-NoLogo", "-NoProfile", "-Command", command], {
+    env: {
+      ...process.env,
+      TEST_REGISTRY_KEY: keyPath,
+      TEST_REGISTRY_NAME: valueName,
+    },
+    encoding: "utf8",
+    timeout: 5000,
+  });
+  assert.equal(result.status, 0, "cannot read optional test registry value");
   return result.stdout.trim();
 }
 
@@ -215,14 +416,29 @@ function runCCSwitchCoordinator(homeDir, port, timeoutMs = 5000) {
   });
 }
 
-function waitForChildExit(child) {
+function waitForChildExit(child, timeoutMs = 10000) {
   return new Promise((resolve, reject) => {
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (typeof child.kill === "function") child.kill();
+      finish(reject, new Error("child process did not exit within " + timeoutMs + " ms"));
+    }, timeoutMs);
+    const finish = (callback, value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      child.removeListener("error", onError);
+      child.removeListener("exit", onExit);
+      callback(value);
+    };
+    const onError = (error) => finish(reject, error);
+    const onExit = (code, signal) => finish(resolve, { code, signal });
     if (child.exitCode !== null) {
-      resolve({ code: child.exitCode, signal: child.signalCode });
+      finish(resolve, { code: child.exitCode, signal: child.signalCode });
       return;
     }
-    child.once("error", reject);
-    child.once("exit", (code, signal) => resolve({ code, signal }));
+    child.once("error", onError);
+    child.once("exit", onExit);
   });
 }
 
@@ -233,6 +449,23 @@ async function waitForFile(filePath, timeoutMs = 5000) {
     await new Promise((resolve) => setTimeout(resolve, 50));
   }
   throw new Error("file was not created within " + timeoutMs + " ms: " + filePath);
+}
+
+async function removeFileWithRetry(filePath, timeoutMs = 5000) {
+  const deadline = Date.now() + timeoutMs;
+  let lastError;
+  while (Date.now() < deadline) {
+    try {
+      fs.rmSync(filePath, { force: true });
+      if (!fs.existsSync(filePath)) return;
+    } catch (error) {
+      lastError = error;
+      if (!['EPERM', 'EBUSY', 'ENOTEMPTY'].includes(error.code)) throw error;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  if (lastError) throw lastError;
+  throw new Error("file could not be removed within " + timeoutMs + " ms: " + filePath);
 }
 
 function ownedProcessIds(homeDir) {
@@ -281,7 +514,7 @@ function isPortListening(port) {
       settled = true;
       resolve(value);
     };
-    const request = http.get({ host: "127.0.0.1", port, path: "/health" }, (res) => {
+    const request = http.get({ host: "127.0.0.1", port, path: "/health", agent: false }, (res) => {
       res.resume();
       finish(true);
     });
@@ -291,6 +524,15 @@ function isPortListening(port) {
     });
     request.on("error", () => finish(false));
   });
+}
+
+async function waitForPortClosed(port, timeoutMs = 5000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (!(await isPortListening(port))) return;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  throw new Error("port did not close within " + timeoutMs + " ms: " + port);
 }
 
 async function waitForHealthy(port, token, timeoutMs = 5000, errorLogPath = "") {
@@ -312,6 +554,20 @@ async function waitForHealthy(port, token, timeoutMs = 5000, errorLogPath = "") 
     detail = `\n${fs.readFileSync(errorLogPath, "utf8")}`;
   }
   throw new Error(`bridge did not become healthy on port ${port}${detail}`);
+}
+
+async function postJsonWithRetry(port, urlPath, payload, headers = {}, attempts = 8) {
+  let lastError;
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      return await postJson(port, urlPath, payload, headers);
+    } catch (error) {
+      lastError = error;
+      trace(`POST ${urlPath} retry ${attempt}: ${error.code || error.message}`);
+      await new Promise((resolve) => setTimeout(resolve, 150));
+    }
+  }
+  throw lastError;
 }
 
 async function removeTree(directory) {
@@ -339,6 +595,50 @@ async function main() {
     root: fs.mkdtempSync(path.join(os.tmpdir(), "vision bridge delayed-")),
     port: await freePort(),
   };
+  const restartCase = {
+    root: fs.mkdtempSync(path.join(os.tmpdir(), "vision bridge restart-")),
+    port: await freePort(),
+  };
+  const diagnosticCase = {
+    root: fs.mkdtempSync(path.join(os.tmpdir(), "vision bridge diagnostic-")),
+    port: await freePort(),
+  };
+  const upstreamOld = {
+    requests: 0,
+    payloads: [],
+    server: http.createServer((req, res) => {
+      upstreamOld.requests += 1;
+      let body = "";
+      req.setEncoding("utf8");
+      req.on("data", (chunk) => { body += chunk; });
+      req.on("end", () => {
+        upstreamOld.payloads.push(JSON.parse(body));
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ source: "old" }));
+      });
+    }),
+  };
+  const upstreamNew = {
+    requests: 0,
+    payloads: [],
+    server: http.createServer((req, res) => {
+      upstreamNew.requests += 1;
+      let body = "";
+      req.setEncoding("utf8");
+      req.on("data", (chunk) => { body += chunk; });
+      req.on("end", () => {
+        upstreamNew.payloads.push(JSON.parse(body));
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ source: "new" }));
+      });
+    }),
+  };
+  const visionOld = createVisionMock("restart-old-vision-description");
+  const visionNew = createVisionMock("restart-new-vision-description");
+  const upstreamOldPort = await listen(upstreamOld.server);
+  const upstreamNewPort = await listen(upstreamNew.server);
+  const visionOldPort = await listen(visionOld.server);
+  const visionNewPort = await listen(visionNew.server);
   const vbsCase = {
     root: fs.mkdtempSync(path.join(os.tmpdir(), "vision bridge vbs-")),
     port: await freePort(),
@@ -364,6 +664,8 @@ async function main() {
   let vbsRegistryPath;
   let occupiedServer;
   let coordinatorProcess;
+  let unknownServer;
+  const noCCSwitchRegistryPath = registryTestPath + "-none";
   try {
     const originalCCSwitchCommand = "C:\\Test Tools\\cc-switch.exe --startup";
     setRegistryValue(registryTestPath, "CC Switch", originalCCSwitchCommand);
@@ -376,6 +678,7 @@ async function main() {
       ".claude/bridge/vision-bridge.js",
       ".claude/bridge/vision-client.js",
       ".claude/bridge/start-vision-bridge.ps1",
+      ".claude/bridge/restart-vision-bridge.ps1",
       ".claude/bridge/start-ccswitch-after-bridge.vbs",
       ".claude/bridge/restore-ccswitch-startup.ps1",
       ".claude/bridge/diagnose-vision-bridge.ps1",
@@ -406,6 +709,40 @@ async function main() {
       "vision-bridge.js",
     )), true);
 
+    setRegistryValue(registryTestPath, "CC Switch", originalCCSwitchCommand);
+    const skippedCoordinationResult = runInstaller(installRoot, installStartup, [
+      "-CCSwitchRunKeyPath",
+      registryTestPath,
+      "-SkipCCSwitchStartupCoordination",
+    ]);
+    assert.equal(
+      skippedCoordinationResult.status,
+      0,
+      skippedCoordinationResult.stdout + "\n" + skippedCoordinationResult.stderr,
+    );
+    assert.match(skippedCoordinationResult.stdout, /coordination was skipped/i);
+    assert.equal(getRegistryValue(registryTestPath, "CC Switch"), originalCCSwitchCommand);
+
+    const noCCSwitchRoot = fs.mkdtempSync(path.join(os.tmpdir(), "vision bridge no-ccswitch-"));
+    const noCCSwitchStartup = path.join(noCCSwitchRoot, "Startup Area");
+    const noCCSwitchInstallResult = runInstaller(noCCSwitchRoot, noCCSwitchStartup, [
+      "-CCSwitchRunKeyPath",
+      noCCSwitchRegistryPath,
+    ]);
+    assert.equal(
+      noCCSwitchInstallResult.status,
+      0,
+      noCCSwitchInstallResult.stdout + "\n" + noCCSwitchInstallResult.stderr,
+    );
+    assert.match(noCCSwitchInstallResult.stdout, /No recognizable CC Switch startup entry was found/i);
+    assert.equal(getRegistryValueOrEmpty(noCCSwitchRegistryPath, "CC Switch"), "");
+    assert.equal(
+      fs.existsSync(path.join(noCCSwitchStartup, "vision-bridge.vbs")),
+      true,
+      "bridge startup must still install without CC Switch",
+    );
+    fs.rmSync(noCCSwitchRoot, { recursive: true, force: true });
+
     createBundle(normal.root);
     const normalResult = runLauncher(normal.root, normal.port);
     assert.equal(normalResult.status, 0, `${normalResult.stdout}\n${normalResult.stderr}`);
@@ -415,17 +752,188 @@ async function main() {
     assert.equal(normalHealth.body.version, "0.2.1");
     await stopOwnedProcesses(normal.root);
 
+    createBundle(restartCase.root);
+    const oldStart = runLauncher(restartCase.root, restartCase.port, {
+      UPSTREAM: "http://127.0.0.1:" + upstreamOldPort + "/v1",
+      VISION_BASE_URL: "http://127.0.0.1:" + visionOldPort + "/v1",
+    });
+    assert.equal(oldStart.status, 0, oldStart.stdout + "\n" + oldStart.stderr);
+    fs.writeFileSync(
+      path.join(restartCase.root, ".claude", "bridge", "bridge-rollback-state.dat"),
+      "invalid migration state",
+    );
+    const bootstrapRestart = runRestart(
+      restartCase.root,
+      restartCase.port,
+      "http://127.0.0.1:" + upstreamOldPort + "/v1",
+      { VISION_BASE_URL: "http://127.0.0.1:" + visionOldPort + "/v1" },
+      ["-BootstrapRollbackState"],
+    );
+    assert.equal(bootstrapRestart.status, 0, bootstrapRestart.stdout + "\n" + bootstrapRestart.stderr);
+    const oldRequest = await postJson(
+      restartCase.port,
+      "/v1/chat/completions",
+      { model: "text-model", messages: [{ role: "user", content: "old" }] },
+      { "x-bridge-token": "startup-test-token" },
+    );
+    assert.equal(oldRequest.status, 200);
+    assert.equal(upstreamOld.requests, 1);
+    const oldImageRequest = await postJsonWithRetry(
+      restartCase.port,
+      "/v1/chat/completions",
+      {
+        model: "text-model",
+        messages: [{ role: "user", content: [
+          { type: "image_url", image_url: { url: "data:image/png;base64,AAAA" } },
+        ] }],
+      },
+      { "x-bridge-token": "startup-test-token" },
+    );
+    assert.equal(oldImageRequest.status, 200);
+    assert.equal(visionOld.requests, 1);
+    assert.equal(upstreamOld.requests, 2);
+    assert.match(JSON.stringify(upstreamOld.payloads.at(-1)), /restart-old-vision-description/);
+    const restartResult = runRestart(
+      restartCase.root,
+      restartCase.port,
+      "http://127.0.0.1:" + upstreamNewPort + "/v1",
+      { VISION_BASE_URL: "http://127.0.0.1:" + visionNewPort + "/v1" },
+    );
+    trace(`successful restart result status=${restartResult.status}`);
+    assert.equal(
+      restartResult.status,
+      0,
+      restartResult.stdout + "\n" + restartResult.stderr +
+        "\nerror=" + (restartResult.error?.message || "none") +
+        "\nsignal=" + (restartResult.signal || "none") +
+        "\nlog=" + (
+          fs.existsSync(path.join(restartCase.root, ".claude", "bridge", "restart-vision-bridge.log"))
+            ? fs.readFileSync(path.join(restartCase.root, ".claude", "bridge", "restart-vision-bridge.log"), "utf8")
+            : "[missing]"
+        ) +
+        "\nerrorLog=" + (
+          fs.existsSync(path.join(restartCase.root, ".claude", "bridge", "vision-bridge.err.log"))
+            ? fs.readFileSync(path.join(restartCase.root, ".claude", "bridge", "vision-bridge.err.log"), "utf8")
+            : "[missing]"
+        ),
+    );
+    await waitForHealthy(restartCase.port, "startup-test-token", 5000);
+    const newRequest = await postJsonWithRetry(
+      restartCase.port,
+      "/v1/chat/completions",
+      { model: "text-model", messages: [{ role: "user", content: "new" }] },
+      { "x-bridge-token": "startup-test-token" },
+    );
+    assert.equal(newRequest.status, 200);
+    assert.equal(newRequest.body.source, "new");
+    assert.equal(upstreamNew.requests, 1);
+    const newImageRequest = await postJsonWithRetry(
+      restartCase.port,
+      "/v1/chat/completions",
+      {
+        model: "text-model",
+        messages: [{ role: "user", content: [
+          { type: "image_url", image_url: { url: "data:image/png;base64,AAAA" } },
+        ] }],
+      },
+      { "x-bridge-token": "startup-test-token" },
+    );
+    assert.equal(newImageRequest.status, 200);
+    assert.equal(visionNew.requests, 1);
+    assert.equal(visionOld.requests, 1);
+    assert.equal(upstreamNew.requests, 2);
+    assert.equal(upstreamOld.requests, 2);
+    assert.match(JSON.stringify(upstreamNew.payloads.at(-1)), /restart-new-vision-description/);
+    trace("successful restart request passed");
+    const failedRestart = runRestart(
+      restartCase.root,
+      restartCase.port,
+      "http://127.0.0.1:" + upstreamNewPort + "/v1",
+      { VISION_BASE_URL: "http://[invalid" },
+    );
+    trace(`failed restart result status=${failedRestart.status}`);
+    assert.notEqual(failedRestart.status, 0, failedRestart.stdout + "\n" + failedRestart.stderr);
+    assert.match(
+      failedRestart.stdout + "\n" + failedRestart.stderr,
+      /previous Vision Bridge configuration was restored successfully/i,
+    );
+    const restoredRequest = await postJsonWithRetry(
+      restartCase.port,
+      "/v1/chat/completions",
+      { model: "text-model", messages: [{ role: "user", content: "restored" }] },
+      { "x-bridge-token": "startup-test-token" },
+    );
+    assert.equal(restoredRequest.status, 200);
+    assert.equal(restoredRequest.body.source, "new");
+    assert.equal(visionNew.requests, 1);
+    assert.equal(visionOld.requests, 1);
+    const restoredImageRequest = await postJsonWithRetry(
+      restartCase.port,
+      "/v1/chat/completions",
+      {
+        model: "text-model",
+        messages: [{ role: "user", content: [
+          { type: "image_url", image_url: { url: "data:image/png;base64,AAAA" } },
+        ] }],
+      },
+      { "x-bridge-token": "startup-test-token" },
+    );
+    assert.equal(restoredImageRequest.status, 200);
+    assert.equal(visionNew.requests, 2);
+    assert.equal(visionOld.requests, 1);
+    assert.match(JSON.stringify(upstreamNew.payloads.at(-1)), /restart-new-vision-description/);
+    trace("rollback request passed");
+    createBundle(diagnosticCase.root);
+    const diagnosticStart = runLauncher(diagnosticCase.root, diagnosticCase.port);
+    assert.equal(diagnosticStart.status, 0, diagnosticStart.stdout + "\n" + diagnosticStart.stderr);
+    const diagnosticPass = runDiagnosticWithOutput(diagnosticCase.root, diagnosticCase.port, { expectPass: true });
+    assert.match(diagnosticPass.stdout, /Required process configuration/);
+    const routerPort = await freePort();
+    const routerDiagnosticPass = runDiagnosticWithOutput(
+      diagnosticCase.root,
+      diagnosticCase.port,
+      { expectPass: true, routePort: routerPort, expectedRoutePort: routerPort },
+    );
+    assert.match(routerDiagnosticPass.stdout, /expected 127\.0\.0\.1:/);
+    const skippedRouteDiagnosticPass = runDiagnosticWithOutput(
+      diagnosticCase.root,
+      diagnosticCase.port,
+      { expectPass: true, routePort: routerPort, skipRouteCheck: true },
+    );
+    assert.match(skippedRouteDiagnosticPass.stdout, /route check skipped/);
+
     const occupiedBundle = createBundle(occupied.root);
     occupiedServer = http.createServer((req, res) => {
       res.writeHead(200, { "content-type": "application/json" });
-      res.end(JSON.stringify({ ok: true, service: "unrelated-service" }));
+      res.end(JSON.stringify({ ok: true, service: "vision-bridge", version: "0.2.1" }));
     });
     occupied.port = await listen(occupiedServer);
     const occupiedResult = runLauncher(occupied.root, occupied.port);
     assert.notEqual(occupiedResult.status, 0);
-    assert.match(`${occupiedResult.stdout}\n${occupiedResult.stderr}`, /not a healthy Vision Bridge version/);
+    assert.match(
+      `${occupiedResult.stdout}\n${occupiedResult.stderr}`,
+      /not the installed Vision Bridge|refusing to stop or reuse owners/i,
+      "a spoofed healthy response must not be reused",
+    );
     await close(occupiedServer);
     occupiedServer = null;
+
+    unknownServer = http.createServer((req, res) => {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ ok: true, service: "unrelated-service" }));
+    });
+    await stopOwnedProcesses(diagnosticCase.root);
+    await waitForPortClosed(diagnosticCase.port);
+    const unknownPort = await listenAt(unknownServer, diagnosticCase.port);
+    const unknownRestart = runRestart(diagnosticCase.root, unknownPort, "https://new.example/v1");
+    assert.notEqual(unknownRestart.status, 0);
+    assert.match(
+      unknownRestart.stdout + "\n" + unknownRestart.stderr,
+      /not the installed Vision Bridge|not node\.exe|owner/i,
+    );
+    assert.equal(await isPortListening(unknownPort), true);
+    await close(unknownServer);
+    unknownServer = null;
 
     const delayedBridgeDir = createBundle(delayed.root);
     fs.writeFileSync(path.join(delayedBridgeDir, "vision-bridge.js"), [
@@ -438,7 +946,11 @@ async function main() {
     ].join("\n"));
     const delayedResult = runLauncher(delayed.root, delayed.port, { BRIDGE_STARTUP_TIMEOUT_MS: "1000" });
     assert.notEqual(delayedResult.status, 0);
-    assert.match(`${delayedResult.stdout}\n${delayedResult.stderr}`, /did not pass health check within 1000 ms/);
+    assert.match(
+      `${delayedResult.stdout}\n${delayedResult.stderr}`,
+      /Vision Bridge (?:did not pass health check within 1000 ms|exited during startup)/i,
+      "delayed startup must fail within the configured health-check deadline",
+    );
     await new Promise((resolve) => setTimeout(resolve, 200));
     assert.equal(await isPortListening(delayed.port), false, "timed-out bridge process must be stopped");
 
@@ -507,7 +1019,7 @@ async function main() {
     const coordinatorExit = await waitForChildExit(coordinatorProcess);
     assert.equal(coordinatorExit.code, 0);
 
-    fs.rmSync(coordinatorCase.marker, { force: true });
+    await removeFileWithRetry(coordinatorCase.marker);
     coordinatorCase.healthReady = false;
     const timeoutProcess = runCCSwitchCoordinator(coordinatorCase.root, coordinatorCase.port, 1000);
     const timeoutExit = await waitForChildExit(timeoutProcess);
@@ -525,12 +1037,19 @@ async function main() {
       coordinatorProcess.kill();
     }
     await close(coordinatorHealth);
+    if (unknownServer) await close(unknownServer);
+    await close(upstreamOld.server);
+    await close(upstreamNew.server);
+    await close(visionOld.server);
+    await close(visionNew.server);
     removeRegistryKey(registryTestPath);
     if (vbsRegistryPath) removeRegistryKey(vbsRegistryPath);
     fs.rmSync(installRoot, { recursive: true, force: true });
     await removeTree(normal);
     await removeTree(occupied);
     await removeTree(delayed);
+    await removeTree(restartCase);
+    await removeTree(diagnosticCase);
     await removeTree(vbsCase);
     await removeTree(coordinatorCase);
   }

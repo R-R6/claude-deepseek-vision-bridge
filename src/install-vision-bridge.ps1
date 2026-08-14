@@ -36,6 +36,11 @@ $sourceItems = @(
         Label = "bridge"
     }
     [pscustomobject]@{
+        Source = Join-Path $sourceDir "restart-vision-bridge.ps1"
+        Destination = Join-Path $bridgeDir "restart-vision-bridge.ps1"
+        Label = "bridge"
+    }
+    [pscustomobject]@{
         Source = Join-Path $sourceDir "start-ccswitch-after-bridge.vbs"
         Destination = Join-Path $bridgeDir "start-ccswitch-after-bridge.vbs"
         Label = "bridge"

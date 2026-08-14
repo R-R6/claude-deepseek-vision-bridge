@@ -13,6 +13,7 @@
 <p align="center">
   <a href="#快速开始">快速开始</a> ·
   <a href="#给其他-ai-的一键安装指令">交给 AI 安装</a> ·
+  <a href="#更换文本-deepseek-上游">更换上游</a> ·
   <a href="#安全边界">安全边界</a> ·
   <a href="#故障排查">故障排查</a>
 </p>
@@ -25,7 +26,7 @@
 
 | 使用场景 | 入口 | 处理方式 |
 | --- | --- | --- |
-| Claude Code 直接粘贴图片或截图 | `vision-bridge.js` | 图片先由 StepFun Vision 描述，再转成文本发给 DeepSeek |
+| Claude Code 直接粘贴图片或截图 | `vision-bridge.js` | 图片先由配置的视觉模型描述，再转成文本发给 DeepSeek |
 | Agent 已拿到本地图片路径或远程 URL | `vision.js` + Vision Skill | 手动调用视觉 API，返回文字描述 |
 | Word、Excel 等文档 | Claude Code 对应内置 Skill | 继续走文档 Skill，不会被本桥改成 OCR 流程 |
 
@@ -33,24 +34,39 @@
 flowchart LR
     CC["Claude Code"] -->|"ANTHROPIC_BASE_URL = 127.0.0.1:15721"| S["CC Switch local proxy"]
     S -->|"active provider target = 127.0.0.1:15720"| B["Vision Bridge"]
-    B -->|"含图片请求"| V["StepFun<br/>Step 3.7 Flash"]
+    B -->|"含图片请求"| V["配置的视觉模型"]
     V -->|"图片文字描述"| B
     B -->|"文本化请求"| D["原始 DeepSeek 上游"]
     B -->|"无图片请求原样透传"| D
 ```
 
+上图展示的是 **CC Switch 模式**。桥本身不负责 Anthropic Messages 与 OpenAI Chat Completions 之间的协议转换；它只负责图片转文字，并保留入口协议的路径与字段语义，把请求转发给 `UPSTREAM`。无图片请求会直接透传；含图片请求会在替换图片块后重新序列化。因此 `UPSTREAM` 必须直接接收桥转发的协议，或指向一个明确负责协议转换的适配器。
+
 ## 快速开始
 
-需要：Windows、Node.js 18+、Git（如果使用 `git clone`）、Claude Code、CC Switch，以及一个可以访问的 DeepSeek 文本上游地址。
+需要：Windows、Node.js 18+、Git（如果使用 `git clone`）、Claude Code，以及一个能把 Claude Code 请求送到本桥的路由器、协议适配器或兼容上游。CC Switch 是已验证的推荐路由器，但不是桥的硬性依赖。
 
-1. 准备 StepFun 的视觉 API Key 和原始 DeepSeek 上游 Base URL。
-2. 选择下面一种安装方式：让其他 AI 按 README 执行，或手动安装；安装器不会猜测或自动填写原始上游地址。
-3. 按安装流程完成环境变量、桥启动、CC Switch 路由和开机启动配置。
-4. 确认 `http://127.0.0.1:15720/health`、`15721` 和最终图片请求都正常。
+先选择路由模式：
+
+| 模式 | 你需要提供 | 本项目负责 | 仍由使用者负责 |
+| --- | --- | --- | --- |
+| CC Switch 已配置 | 真实文本上游 Base URL、视觉模型三项 | 配置桥、安装 Skill、安装登录启动入口 | CC Switch 中的文本 Key、Model、目标地址和开机启动开关 |
+| 其他路由器已配置 | 真实文本上游 Base URL、视觉模型三项 | 配置桥、安装 Skill、安装登录启动入口 | 让现有路由器把请求送到桥，并保留路由器中的文本 Key/Model |
+| 直连桥 | 能接收 Claude Code Anthropic Messages 的文本上游，或提供 Anthropic-compatible 入口并负责后续转换的适配器地址、视觉模型三项，以及 Claude Code 使用的文本 Key/Model | 配置桥、安装 Skill、安装登录启动入口 | Claude Code 的桥地址、文本凭据和模型；桥不会把 Anthropic Messages 转换成 OpenAI，原生 OpenAI-only DeepSeek 地址不能直接作为直连桥的 `UPSTREAM` |
+
+桥不会编辑 CC Switch SQLite、供应商、模型映射或未知路由器配置。无论哪种模式，先完成桥安装，再分别验证桥健康、路由链路和最终图片请求。
+
+### 没有 CC Switch 时的协议边界
+
+没有 CC Switch 也可以使用本项目，但必须先有能承接 Claude Code 请求的兼容上游、路由或协议适配器：
+
+- 已有协议适配器暴露 Anthropic-compatible 入口时，链路是 `Claude Code -> Vision Bridge -> 适配器 -> DeepSeek`；桥保持 Anthropic Messages 的协议语义，适配器自己负责后续协议转换，把适配器的 Anthropic 入口写入 `UPSTREAM`。
+- 已有路由器先把 Claude Code 请求转换成 OpenAI Chat Completions 时，链路是 `Claude Code -> 路由器 -> Vision Bridge -> DeepSeek`；路由器把转换后的请求送到桥端口，桥保持 OpenAI Chat Completions 的协议语义，把真实 OpenAI-compatible DeepSeek 地址写入 `UPSTREAM`。
+- 不能把一个只接受 OpenAI Chat Completions 的原生 DeepSeek 地址直接放进“直连桥”模式，然后期待桥替你完成协议转换。此时应使用 CC Switch 或外部协议适配器。
 
 ### 给其他 AI 的一键安装指令
 
-不需要先手动下载仓库。把下面完整内容复制给 Claude Code、Codex 或其他能够访问 GitHub、执行命令和修改本机配置的 AI。尖括号中的内容只在私聊中替换；不要把真实 API Key 发到公开聊天、截图或 Git 仓库。
+不需要先手动下载仓库。先把下面配置块中的路由模式和需要的字段替换为实际值，再把完整内容复制给 Claude Code、Codex 或其他能够访问 GitHub、执行命令和修改本机配置的 AI。不要把真实 API Key 发到公开聊天、截图或 Git 仓库。
 
 > **网络环境提醒：** 如果你所在的电脑已开启 Clash 代理，请注意下面的完整安装指令包含代理地址。使用者和 AI 都应先确认这句话是否适合当前电脑，避免误用他人的本地代理端口。
 
@@ -71,47 +87,52 @@ https://github.com/R-R6/claude-deepseek-vision-bridge
 
 我的目标：在 Claude Code 使用纯文本 DeepSeek 模型时，可以直接粘贴图片并识别；如果我提供本地图片路径或远程图片 URL，也可以调用全局 Vision Skill。
 
-视觉服务配置：
-- 模型：阶跃星辰 Step 3.7 Flash
-- Model ID：step-3.7-flash
-- Base URL：https://api.stepfun.com/v1
-- API Key：我已在本机用户级环境变量 `VISION_API_KEY` 中配置（只能检查是否存在，不得读取或回显）
-- 如果该变量不存在，请先向我索要 API Key；收到后只写入当前 Windows 用户级环境变量，不得在命令输出、日志、截图、源码、README、CC Switch 备注或 Git 中回显。
-- 如果必须由我现场提供 API Key，请使用不回显输入的安全提示，不要把真实值拼进命令行参数、PowerShell 历史或聊天记录。
-- 如果 `VISION_BASE_URL` 或 `VISION_MODEL` 缺失，可按上面的非敏感固定值写入当前 Windows 用户级环境变量；如果 `BRIDGE_HOST` 或 `BRIDGE_PORT` 缺失，使用 `127.0.0.1` 和 `15720`。这些变量写入后要刷新启动桥的进程环境。
-- 默认个人电脑不要主动创建 `BRIDGE_AUTH_TOKEN`。如果这台电脑已经设置了它，不要删除或回显；必须同时确认 CC Switch 能为发往桥的请求注入 `x-bridge-token`，否则会出现 `401`。
+路由模式（只选择一项）：
+- <CC Switch 已配置 / 其他路由器已配置 / 直连桥>
 
-文本模型路由：
-- 我使用 CC Switch 管理 Claude Code 路由。
-- 原始 DeepSeek 上游 Base URL：<修改 CC Switch 前的真实上游地址>
-- Vision Bridge 本地地址：http://127.0.0.1:15720
-- Claude Code 到 CC Switch 的本地代理地址应保持为 `http://127.0.0.1:15721`；不要把 Claude Code 的代理地址直接改成 `15720`。
-- 只把 CC Switch 当前实际使用的 DeepSeek 供应商目标地址改为 `http://127.0.0.1:15720`，不要修改模型映射、`input_modalities` 或其他供应商。
+本次安装使用以下配置。请按字段使用这些值，不要猜测、替换或要求我重复提供：
+
+纯文本 DeepSeek 模型：
+- Base URL: <真实文本模型 Base URL>
+- API Key: <文本模型 API Key；如果路由模式为 CC Switch 已配置，填写“已在 CC Switch 中配置”>
+- Model: <文本模型 ID；如果路由模式为 CC Switch 已配置，填写“已在 CC Switch 中配置”>
+
+视觉模型：
+- Base URL: <真实视觉模型 Base URL>
+- API Key: <视觉模型 API Key>
+- Model: <视觉模型 ID>
+
+配置映射：
+- 纯文本模型 Base URL 写入当前用户环境变量 `UPSTREAM`；它是桥转发请求的真实上游地址，不是 CC Switch 的最终目标地址。
+- 视觉模型 Base URL、API Key 和 Model 分别写入 `VISION_BASE_URL`、`VISION_API_KEY`、`VISION_MODEL`。
+- 纯文本 API Key 和 Model 不由桥保存或推断：CC Switch 模式由我在 CC Switch 中维护，其他路由器模式由我在现有路由器中维护，直连桥模式由我在 Claude Code/协议适配器中维护。
+- 如果路由模式为 CC Switch 已配置，不要修改 CC Switch 的文本 Key、Model、供应商、路由或数据库；安装完成后提醒我由自己把当前活动供应商的目标地址确认或修改为 `http://127.0.0.1:15720`，并保留 Claude Code 到 CC Switch 的 `http://127.0.0.1:15721`。
+- 如果路由模式为其他路由器已配置，不要猜测或修改未知路由器；使用 `-SkipCCSwitch -ExpectedRoutePort <现有路由器端口>` 诊断，或在端口未知时使用 `-SkipRouteCheck`，并提醒我确认现有路由器实际指向 `BRIDGE_PORT`。
+- 如果路由模式为直连桥，不要修改未知路由器；使用 `-SkipCCSwitch` 诊断，并提醒我确认 Claude Code 实际指向 `BRIDGE_PORT`。
+- 写入或验证时不要在命令输出、日志、截图、源码、README、CC Switch 备注或 Git 中显示 API Key；只报告是否配置成功。
 
 请按下面顺序替我完成：
-1. 先检查 `node --version`、`git --version`、Claude Code、CC Switch、用户级环境变量、`15720` 和 `15721` 端口。API Key 只能检查是否存在，不能读取或回显。
-2. 确认我提供的 `<修改 CC Switch 前的真实上游地址>` 已经替换为真实地址。如果当前 CC Switch 已经指向 `127.0.0.1:15720`，不要猜测原始地址；从 CC Switch 的当前供应商配置、官方导出或我提供的备份中确认。没有真实地址就暂停并向我询问。
-3. 使用 CC Switch 自带的导出/备份功能备份当前供应商配置；如需复制 `%USERPROFILE%\.cc-switch\cc-switch.db`，先确保 CC Switch（包括托盘进程）已完全退出，不要在数据库运行时写入或编辑它。备份 Claude Code 的 `%USERPROFILE%\.claude\settings.json`。备份放在仓库目录之外，不要删除或覆盖无关配置。
-4. 检查 CC Switch 的“开机启动”已开启，并确认 Windows `CC Switch` 登录启动项确实存在。安装器只会包装已有的标准登录启动项，不会替用户创建 CC Switch 启动项。
-5. 确认用户级环境变量 `VISION_API_KEY`、`VISION_BASE_URL`、`VISION_MODEL`、`UPSTREAM`、`BRIDGE_HOST` 和 `BRIDGE_PORT`。`UPSTREAM` 必须是修改前的真实 DeepSeek 地址，不能是 `127.0.0.1:15720`。如果变量缺失，先向我询问，不要编造。
-6. 如果刚用 `[Environment]::SetEnvironmentVariable(..., "User")` 写入变量，不要直接在同一个旧 PowerShell 进程中启动桥：先退出并重新打开 PowerShell，或在不打印值的前提下把用户变量刷新到当前进程。未来 Windows 登录启动还需要重新登录或重启 Explorer 才能继承新变量。
-7. 从仓库根目录运行 `npm.cmd run check` 和 `npm.cmd test`，再运行仓库提供的 Windows 安装脚本。安装器会把桥运行时、全局 Vision Skill 和登录启动入口安装到对应目录，并备份同名旧文件。
-8. 必须检查安装器输出：应看到 `CC Switch startup now waits for the bridge health check`。如果输出 `No recognizable CC Switch startup entry was found`，不要宣称开机顺序已修复；先在 CC Switch 中开启开机启动，完全退出并重新打开 CC Switch，再检查 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`，必要时重新运行安装器。安装器只识别名为 `CC Switch` 的标准用户登录启动项，不会接管任务计划程序、启动文件夹快捷方式或其他自定义启动器。
-9. 检查 `http://127.0.0.1:15720/health`。健康响应必须包含 `ok=true`、`service=vision-bridge` 和当前受管版本；若设置了 `BRIDGE_AUTH_TOKEN`，请求必须带 `x-bridge-token`。如果已有旧版本桥进程占用 `15720`，只允许在命令行精确指向 `%USERPROFILE%\.claude\bridge\vision-bridge.js` 且确认是旧受管桥时停止它；不要按 `node.exe` 名称杀进程。
-10. 在 CC Switch 中只修改当前实际 app 类型和活动 DeepSeek 供应商的目标地址为 `http://127.0.0.1:15720`。保留 Claude Code 到 CC Switch 的 `http://127.0.0.1:15721`，保留 `UPSTREAM` 的真实地址，不要形成循环代理。
-11. 运行只读诊断脚本 `powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "$env:USERPROFILE\.claude\bridge\diagnose-vision-bridge.ps1"`，确认桥、`15721`、Claude Code 路由和用户配置均正常。该脚本不会编辑 SQLite，也不会显示密钥。验证一条无图片文本请求、Claude Code 直接粘贴图片，并在需要时验证本地图片路径的 Vision Skill。
-12. 让我在 Claude Code 中完成最终粘贴图片测试；如果需要验证开机流程，先向我确认再重启 Windows。重启后登录并等待约 10-30 秒，再直接打开 Claude Code 验证无需手动命令即可识图；不要未经确认自动重启电脑。
-13. 每一步展示实际命令结果和验证证据；失败时保留原配置并说明具体失败层，不要声称“已完成”却没有测试。
+1. 先检查 `node --version`、`git --version`、Claude Code、当前路由器和用户级环境变量。只有 CC Switch 模式才检查 `15721`；其他模式不要因为没有 CC Switch 而失败。API Key 只能检查是否存在，不能读取或回显。
+2. 按所选模式检查必需字段：CC Switch/其他路由器模式至少需要真实文本 Base URL 和视觉三项；直连桥模式还必须确认 Claude Code 或协议适配器已有文本 Key/Model。CC Switch 模式下文本 API Key/Model 可以是“已在 CC Switch 中配置”，不得要求重复提供。确认视觉服务兼容 OpenAI Chat Completions，以及 `UPSTREAM` 能接收桥转发的请求格式。缺少字段或格式不正确时，只报告具体缺项并暂停，不要猜测。
+3. 只安装仓库提供的桥、Vision Skill 和 Windows 登录入口。不要编辑 CC Switch SQLite、供应商、模型映射、路由或任何未知路由器配置；这些由我自己完成或确认。
+4. 如果是 CC Switch 模式，检查它的开机启动是否已由我开启；如果没有标准登录启动项，只报告，不要替我创建或接管其他启动方式。其他模式跳过 CC Switch 检查。
+5. 按“配置映射”写入视觉模型的三个用户级环境变量和纯文本模型的 `UPSTREAM`。不要把真实文本 Base URL 写成 CC Switch/路由器的最终桥目标，也不要把桥地址写进 `UPSTREAM`。
+6. 如果刚用 `[Environment]::SetEnvironmentVariable(..., "User")` 写入变量，先完成安装再运行已安装的 `restart-vision-bridge.ps1`；它默认使用 `-EnvironmentScope User`，不要把 API Key 放入命令行。该脚本只会停止经过命令行、路径、所有者和启动时间二次确认的本项目旧桥。若这是早于回滚快照功能的旧安装且提示没有受保护快照，只有在确认当前用户环境仍是现有桥配置时，才追加 `-BootstrapRollbackState` 进行一次迁移；如果配置刚改过但旧进程尚未加载，先重启 Windows，不要强行迁移。
+7. 从仓库根目录运行 `npm.cmd run check` 和 `npm.cmd test`，再运行仓库提供的 Windows 安装脚本。CC Switch 模式使用默认安装命令；其他路由器/直连桥模式必须追加 `-SkipCCSwitchStartupCoordination`，即使电脑上安装了 CC Switch 也不要包装它的登录启动项。安装器会把桥运行时、全局 Vision Skill、重启脚本和登录启动入口安装到对应目录，并备份同名旧文件；它不会停止已有桥进程。
+8. 安装完成后运行已安装的 `restart-vision-bridge.ps1`，让新用户级配置真正加载到桥进程；如果端口由未知进程或不健康桥占用，脚本会保留原状并失败，不要强行停止占用者。只有旧安装缺少回滚快照且当前用户环境确认未变化时，才使用 `-BootstrapRollbackState` 一次建立迁移快照。然后检查 `http://127.0.0.1:15720/health`，健康响应必须包含 `ok=true`、`service=vision-bridge` 和当前受管版本；若设置了 `BRIDGE_AUTH_TOKEN`，请求必须带 `x-bridge-token`。
+9. CC Switch 模式提醒我自己把当前活动供应商目标确认或修改为 `http://127.0.0.1:15720`，并保留 Claude Code 到 CC Switch 的 `http://127.0.0.1:15721`；不要把文本真实上游继续作为最终目标。其他路由器模式提醒我自己确认现有路由器实际指向 `BRIDGE_PORT`；直连桥模式提醒我自己确认 Claude Code 指向 `BRIDGE_PORT`，且 `UPSTREAM` 是兼容 Claude Code 请求格式的上游或适配器。
+10. 按当前模式运行诊断：CC Switch 模式使用默认诊断；其他路由器模式使用 `diagnose-vision-bridge.ps1 -SkipCCSwitch -ExpectedRoutePort <现有路由器端口>`，端口未知时使用 `-SkipRouteCheck`；直连桥模式使用 `-SkipCCSwitch`。确认桥和路由链路后，先验证无图片文本请求，再测试粘贴图片和需要时的本地图片路径 Vision Skill。
+11. 让我完成最终粘贴图片测试；如果需要验证开机流程，先向我确认再重启 Windows。重启后登录并等待约 10-30 秒，再直接打开 Claude Code 验证无需手动命令即可识图；不要未经确认自动重启电脑。
+12. 每一步展示实际命令结果和验证证据；失败时保留原配置并说明具体失败层，不要声称“已完成”却没有测试。
 
 安装成功的硬性证据：
 - `15720/health` 返回当前受管桥版本；
-- `15721` 正在监听；
-- Claude Code 的 `ANTHROPIC_BASE_URL` 仍指向 `http://127.0.0.1:15721`；
-- CC Switch 活动供应商目标指向 `http://127.0.0.1:15720`；
-- Windows `CC Switch` 登录启动项包含 `start-ccswitch-after-bridge.vbs`；
+- CC Switch 模式：`15721` 正在监听、Claude Code 的 `ANTHROPIC_BASE_URL` 指向 `http://127.0.0.1:15721`、活动供应商目标指向 `http://127.0.0.1:15720`，并且 Windows `CC Switch` 登录启动项包含 `start-ccswitch-after-bridge.vbs`；
+- 其他路由器模式：现有路由器已明确指向 `BRIDGE_PORT`，其文本 Key/Model 已配置，并且 `UPSTREAM` 是与桥收到的请求协议兼容的上游；
+- 直连桥模式：Claude Code 已指向 `BRIDGE_PORT`，Claude Code/适配器已配置文本 Key/Model，且 `UPSTREAM` 是 Anthropic-compatible 上游或适配器；
 - 重启 Windows 后无需手动启动桥或重新修改路由。
 
-如果我没有提供真实 DeepSeek 上游地址或完整 API Key，请先只向我询问缺少的值，不要编造。API Key 已经在本机用户级环境变量中配置时，只检查是否存在，绝对不要回显它。
+如果配置块中有任何必需字段缺失，请只报告缺少的字段，不要编造或从其他配置猜测。完成后只报告配置是否成功，不要回显任何 API Key。
 ```
 
 如果 AI 遇到以下任一情况，应该暂停并报告，而不是猜测或强行覆盖：真实 `UPSTREAM` 不明、`15720`/`15721` 被未知进程占用、CC Switch 没有标准登录启动项、已配置 `BRIDGE_AUTH_TOKEN` 但 CC Switch 无法注入 `x-bridge-token`，或 CC Switch 更新后启动项指向了不存在的旧路径。AI 也不应为了“让测试通过”把 `UPSTREAM` 改成桥地址、关闭令牌、修改 `input_modalities` 或编辑 CC Switch 数据库。
@@ -155,25 +176,19 @@ UPSTREAM：          原始 DeepSeek 上游地址（不要改成桥地址）
 
 </details>
 
-这段指令不会替 AI 猜测缺失的上游地址，也不会要求把密钥写入仓库。更安全的做法是先在本机设置 `VISION_API_KEY`，然后让 AI 只检查“是否已配置”。
+这段指令会按所选路由模式配置桥，不会擅自接管 CC Switch 或其他路由器，也不会猜测缺失值或把配置写入仓库。
 
 ## Windows 登录后自动启动
 
-桥通过当前用户的 Windows Startup 文件夹在**登录后**启动，不是系统服务，也不会在登录前运行。安装器只需要当前用户权限，不需要管理员权限；请在将要使用 Claude Code/CC Switch 的同一个 Windows 用户下运行，不要用另一个管理员账户或系统账户运行，否则 `%USERPROFILE%`、用户环境变量、Startup 文件夹和 `HKCU` 可能不属于实际使用者。
-
-安装仓库后执行：
+桥通过当前用户的 Windows Startup 文件夹在登录后启动，不是系统服务。请在实际使用 Claude Code/CC Switch 的同一个 Windows 用户下运行安装器，不需要管理员权限：
 
 ```powershell
 powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\src\install-vision-bridge.ps1
 ```
 
-安装器会先验证并暂存全部源文件，再备份已有的桥文件、Vision Skill 和 `vision-bridge.vbs`，最后替换 Startup 入口。如果检测到当前用户注册表中名为 `CC Switch` 的标准登录启动项，安装器还会把这条启动命令包在桥健康检查之后；原始命令保存在 `%USERPROFILE%\.claude\bridge\cc-switch-startup.command`，备份清单位于 `%USERPROFILE%\.claude\bridge\backups\install-*\manifest.json`。它不会设置环境变量、读取或写入 API Key，也不会修改 CC Switch 数据库、供应商或路由。
+安装器会备份并安装桥、Vision Skill 和 Startup 入口；如果已经存在名为 `CC Switch` 的标准用户登录启动项，还会让它等待桥健康后再启动。原始命令和备份保存在 `%USERPROFILE%\.claude\bridge` 下。安装器不会设置环境变量、读取 API Key、编辑 CC Switch 数据库或修改供应商路由。
 
-安装完成后，启动器会检查当前进程环境中的 `UPSTREAM` 和 `VISION_API_KEY`，验证端口上是否是本项目的受管版本，并在启动后轮询 `/health`。缺少配置、端口被其他程序占用或桥进程启动失败时，错误会写入 `%USERPROFILE%\.claude\bridge\vision-bridge.err.log`。如果桥未健康，CC Switch 协调器不会启动 CC Switch，避免它先启动并产生 502/503；详情写入 `%USERPROFILE%\.claude\bridge\cc-switch-startup.log`。
-
-桥启动成功只代表 `15720` 可用，不代表 CC Switch 路由已经正确。必须另外确认 `15721` 正在监听、Claude Code 仍使用 `15721`，并且 CC Switch 当前活动供应商的目标地址使用 `15720`。
-
-设置用户级环境变量后，要退出并重新登录 Windows，或至少重新打开 Explorer、终端、CC Switch 和 Claude Code，使 Startup 启动器实际继承到这些变量。启动器不会从旧 PowerShell 会话或 CC Switch 数据库猜测 `UPSTREAM`。
+启动器要求当前进程能看到 `UPSTREAM` 和 `VISION_API_KEY`，并会把错误写入 `%USERPROFILE%\.claude\bridge\vision-bridge.err.log`。设置用户级变量后，重新打开终端、CC Switch 和 Claude Code；要让 Windows 登录启动继承新值，重新登录或重启 Windows。
 
 查看重启后的分层状态：
 
@@ -181,66 +196,66 @@ powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\src\install-vi
 powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "$env:USERPROFILE\.claude\bridge\diagnose-vision-bridge.ps1"
 ```
 
-如需卸载，只删除 Startup 中的 `vision-bridge.vbs` 和本项目安装的脚本/Skill；如果安装器接管过 CC Switch 登录启动项，先运行 `powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "$env:USERPROFILE\.claude\bridge\restore-ccswitch-startup.ps1"` 恢复原始命令。不要删除 `cc-switch-startup.command` 或 `backups`，直到确认原始 CC Switch 启动项已经恢复。要回滚桥文件，按照备份目录的 `manifest.json` 将对应文件恢复后，再启动原来的桥。
+如需卸载，先用 `%USERPROFILE%\.claude\bridge\restore-ccswitch-startup.ps1` 恢复 CC Switch 原始启动命令，再删除本项目安装的桥、Skill 和 Startup 文件；确认恢复成功前保留 `cc-switch-startup.command` 与 `backups`。
 
 ## 与 CC Switch 一起工作
 
-使用 CC Switch 本地代理时，实际链路是：
+| 位置 | 地址或变量 | 配置位置 |
+| --- | --- | --- |
+| Claude Code -> CC Switch | `http://127.0.0.1:15721` | Claude Code 的 `ANTHROPIC_BASE_URL` |
+| CC Switch -> Vision Bridge | `http://127.0.0.1:15720` | 当前活动供应商的目标地址 |
+| Vision Bridge -> 文本上游 | `UPSTREAM` | 当前 Windows 用户环境变量 |
+| Vision Skill -> 视觉服务 | `VISION_BASE_URL` | 当前 Windows 用户环境变量 |
 
-```text
-Claude Code / Claude Desktop
-  -> CC Switch 127.0.0.1:15721
-  -> 当前 app 类型和供应商的目标地址 127.0.0.1:15720
-  -> UPSTREAM 中保存的真实文本上游
-```
+Claude Code 和 Claude Desktop 可能使用不同的 CC Switch app 类型/供应商配置，请确认实际使用的那一项。不要把 `localhost`、`15720` 和 `15721` 的角色混用。
 
-`15721` 是 CC Switch 代理，`15720` 才是本项目的桥。Claude Code 和 Claude Desktop 可能使用不同的 app 类型/供应商配置；请在 CC Switch 界面分别确认实际使用的配置，而不是只改一个看起来相同的供应商。目标地址优先使用 `http://127.0.0.1:15720`，不要写成 `localhost`，因为桥默认只绑定 IPv4 loopback。
-
-CC Switch 自身是否随 Windows 登录启动仍是用户设置。安装器只会包装已经存在的名为 `CC Switch` 的登录启动命令，不会创建 CC Switch 启动项，也不会修改 CC Switch 的登录开关。如果 `15720` 健康但 `15721` 没有监听，检查 `cc-switch-startup.log`，确认桥健康后再手动启动 CC Switch；若两端口都正常但请求没有进入桥，检查当前 app 类型、活动供应商目标地址和 CC Switch 的媒体降级设置。
+CC Switch 是否随 Windows 登录启动仍由其自身设置控制；安装器不会创建或修改这个开关。`15720` 健康但 `15721` 未监听时，检查 `cc-switch-startup.log`；两端口都正常但请求绕过桥时，检查当前 app 类型和活动供应商目标地址。
 
 本项目不在启动时自动编辑 CC Switch 的 SQLite 数据库，也不改供应商、模型映射或路由。它只在安装阶段包装 Windows 注册表中已经存在的 CC Switch 登录启动命令；需要调整路由时先用 CC Switch 界面，并先备份其配置。
 
-### 三个地址和一个上游变量
+### 更换文本 DeepSeek 上游
 
-| 项目 | 默认值 | 应该放在哪里 | 作用 |
-| --- | --- | --- | --- |
-| CC Switch 本地代理 | `http://127.0.0.1:15721` | Claude Code 的 `ANTHROPIC_BASE_URL` | Claude Code 先连接 CC Switch |
-| Vision Bridge 本地地址 | `http://127.0.0.1:15720` | CC Switch 当前活动供应商的目标地址 | CC Switch 把请求交给图片转换桥 |
-| 原始文本上游 | 无固定值 | 用户环境变量 `UPSTREAM` | 桥把文本化请求转发到真正的 DeepSeek 服务 |
-| 视觉服务 | `https://api.stepfun.com/v1` | 用户环境变量 `VISION_BASE_URL` | 桥/Skill 把图片发送到视觉模型 |
+桥不保存文本模型的 Base URL 或 API Key：`UPSTREAM` 保存真实上游地址，文本 API Key 由当前路由器、Claude Code 或协议适配器保存并随 `Authorization` 头发送。
 
-不要把这四个位置混用：`ANTHROPIC_BASE_URL` 不是 `UPSTREAM`，`UPSTREAM` 也不能写成本地桥地址；否则可能出现网关错误、自代理循环或图片请求绕过桥。
+| 要更换的内容 | 修改位置 | 修改后 |
+| --- | --- | --- |
+| 文本模型 Base URL | 当前用户的 `UPSTREAM` | 重新打开 PowerShell，重启桥、CC Switch 和 Claude Code |
+| 文本模型 API Key | 当前模式的路由器、Claude Code 或协议适配器 | 在对应位置保存后重启承载它的客户端/路由器；不用重装桥 |
+
+更换 Base URL 时：
+
+```powershell
+[Environment]::SetEnvironmentVariable(
+  "UPSTREAM",
+  "https://your-deepseek-provider.example/v1",
+  "User"
+)
+```
+
+把占位地址替换成自己的真实地址，例如 `https://tokenrhythm.studio/v1`。不要把 `UPSTREAM` 改成 `15720`，否则会形成自代理循环。修改 `UPSTREAM`、视觉配置或桥配置后，使用已安装的重启脚本重新加载用户级环境变量：
+
+```powershell
+powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass `
+  -File "$env:USERPROFILE\.claude\bridge\restart-vision-bridge.ps1"
+```
+
+该脚本只会停止经过路径、命令行、当前用户和启动时间二次确认的本项目旧桥，然后启动新桥并等待健康检查；它会造成短暂中断，不会停止未知的 `node.exe`。如果这是早于回滚快照功能的旧安装，先确认用户级环境仍对应当前运行桥，再使用：
+
+```powershell
+powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass `
+  -File "$env:USERPROFILE\.claude\bridge\restart-vision-bridge.ps1" `
+  -BootstrapRollbackState
+```
+
+如果没有已安装的旧桥，或当前配置刚刚变化但旧桥尚未加载，也可以重启 Windows，让登录启动入口读取新配置。
+
+按当前模式替换文本 API Key：CC Switch 模式改当前活动供应商，其他路由器模式改现有路由器，直连桥模式改 Claude Code 或协议适配器。不要把它写进 `UPSTREAM`、README、`.env`、命令行或 Git；CC Switch/其他路由器的目标地址仍应是 `http://127.0.0.1:15720`，直连桥模式的 `ANTHROPIC_BASE_URL` 也应指向桥，否则图片请求会绕过桥。修改后先测试文本请求，再测试粘贴图片。
+
+新电脑首次安装时，CC Switch 模式建议先在 CC Switch 中配置并验证真实文本上游，再安装桥并把当前供应商目标改为 `15720`。其他路由器/直连模式可以不安装 CC Switch，但必须先准备兼容的路由或协议适配器。桥不会创建供应商、保存文本 API Key 或编辑 CC Switch 数据库；没有可用路由时只能完成桥文件安装，不能完成最终链路测试。
 
 ### CC Switch 更新后的检查
 
-CC Switch 官方更新通常会替换程序文件，但更新器也可能重写登录启动项或改变安装路径。更新后请重新运行只读诊断脚本，并检查：
-
-```powershell
-$runValue = [string](Get-ItemProperty -LiteralPath "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run" -Name "CC Switch" -ErrorAction SilentlyContinue).'CC Switch'
-if ([string]::IsNullOrWhiteSpace($runValue)) {
-    "CC Switch Run entry: missing"
-} elseif ($runValue -match "start-ccswitch-after-bridge\.vbs") {
-    "CC Switch Run entry: coordinated"
-} else {
-    "CC Switch Run entry: present but not coordinated"
-}
-"Coordinator file: {0}" -f (Test-Path -LiteralPath "$env:USERPROFILE\.claude\bridge\start-ccswitch-after-bridge.vbs")
-```
-
-如果 `CC Switch` 的登录启动项仍包含 `start-ccswitch-after-bridge.vbs`，通常只需确认新版本的 `cc-switch.exe` 能由备份命令启动。如果协调器仍在，但 `%USERPROFILE%\.claude\bridge\cc-switch-startup.command` 中的程序路径已不存在，不要让协调器继续调用失效路径：先手动启动真实存在的新版本 `cc-switch.exe`，在 CC Switch 中关闭再重新开启开机启动，让官方程序重新写入新的登录启动命令，然后重新运行安装器。只有当备份命令本身已知有效、且你确实要恢复旧启动方式时，才运行恢复脚本。如果启动项已被更新器改回原始命令、原始程序路径已变化，或启动项消失：
-
-1. 在 CC Switch 中重新开启开机启动，并完全退出再重新打开 CC Switch。
-2. 确认注册表中的 `CC Switch` 启动命令指向真实存在的新版程序。
-3. 从本仓库重新运行 `install-vision-bridge.ps1`，让安装器重新备份当前启动命令并包装协调器。
-4. 再运行 `diagnose-vision-bridge.ps1`，最后重启 Windows 验证。
-
-如果需要恢复旧启动项，使用安装器复制到用户目录的脚本：
-
-```powershell
-powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "$env:USERPROFILE\.claude\bridge\restore-ccswitch-startup.ps1"
-```
-
-不要手动把更新后的 `cc-switch.exe` 路径猜写进 `cc-switch-startup.command`，不要修改 CC Switch 数据库。安装器每次运行都会创建新的备份目录；确认新启动链路正常前，不要删除旧备份。
+更新 CC Switch 后先运行 `diagnose-vision-bridge.ps1`。如果登录启动项不再包含桥协调器，或其保存的程序路径已不存在：在 CC Switch 中关闭再开启开机启动，完全退出并重新打开 CC Switch，再重新运行安装器。不要猜写 `cc-switch.exe` 路径或编辑 SQLite；恢复安装前的启动项可运行 `%USERPROFILE%\.claude\bridge\restore-ccswitch-startup.ps1`。
 
 ## 手动安装（Windows）
 
@@ -255,20 +270,20 @@ Set-Location .\claude-deepseek-vision-bridge
 
 ### 2. 配置环境变量
 
-下面的变量写入当前 Windows 用户，不会进入 Git。尖括号是占位符，不能原样执行；如果 `VISION_API_KEY` 已经存在，不要覆盖它。`UPSTREAM` 必须填写改路由前的真实 DeepSeek 上游地址；不要把它写成桥自己的地址。仓库里的 `.env.example` 只是配置参考，本项目不会自动加载 `.env` 文件。
+下面的变量写入当前 Windows 用户，不会进入 Git。这里的值应来自一键安装指令中的“视觉模型”配置和“纯文本 DeepSeek 模型”的 Base URL；尖括号不能原样执行。`UPSTREAM` 必须填写真实文本上游地址；不要把它写成桥自己的地址。文本 API Key 和 Model 由当前模式的 CC Switch、其他路由器、Claude Code 或协议适配器维护，桥不会替你写入。仓库里的 `.env.example` 只是配置参考，本项目不会自动加载 `.env` 文件。
 
 ```powershell
-[Environment]::SetEnvironmentVariable("VISION_BASE_URL", "https://api.stepfun.com/v1", "User")
-[Environment]::SetEnvironmentVariable("VISION_MODEL", "step-3.7-flash", "User")
+[Environment]::SetEnvironmentVariable("VISION_BASE_URL", "<视觉模型 Base URL>", "User")
+[Environment]::SetEnvironmentVariable("VISION_MODEL", "<视觉模型 ID>", "User")
 [Environment]::SetEnvironmentVariable("UPSTREAM", "<原始 DeepSeek 供应商 Base URL>", "User")
 [Environment]::SetEnvironmentVariable("BRIDGE_HOST", "127.0.0.1", "User")
 [Environment]::SetEnvironmentVariable("BRIDGE_PORT", "15720", "User")
 ```
 
-如果 `VISION_API_KEY` 缺失，请单独使用不回显的安全输入设置它，不要把真实 Key 写进命令文本：
+将“视觉模型”的 API Key 写入 `VISION_API_KEY`。如果需要在 PowerShell 中设置，使用不回显的安全输入，不要把真实 Key 写进命令文本：
 
 ```powershell
-$secureKey = Read-Host "StepFun API key" -AsSecureString
+$secureKey = Read-Host "Vision model API key" -AsSecureString
 $keyPtr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secureKey)
 try {
     $keyPlain = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($keyPtr)
@@ -282,7 +297,7 @@ try {
 }
 ```
 
-如果只缺少非敏感变量，可以按上面的固定值设置；如果缺少 `VISION_API_KEY` 或真实 `UPSTREAM`，先取得正确值，不要编造。然后先运行离线检查：
+如果只缺少非敏感变量，可以按上面的配置值设置；如果缺少视觉 API Key 或真实文本上游，先取得正确值，不要编造。然后先运行离线检查：
 
 只检查用户级变量是否存在时，使用不会回显值的方式：
 
@@ -302,10 +317,17 @@ npm.cmd test
 
 ### 3. 安装启动入口
 
-确认环境变量已配置、当前 PowerShell 已刷新，并且离线检查已通过后，再运行安装器：
+确认环境变量已配置、当前 PowerShell 已刷新，并且离线检查已通过后，再运行安装器。CC Switch 模式使用：
 
 ```powershell
 powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\src\install-vision-bridge.ps1
+```
+
+其他路由器或直连桥模式使用：
+
+```powershell
+powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass `
+  -File .\src\install-vision-bridge.ps1 -SkipCCSwitchStartupCoordination
 ```
 
 安装器会把桥、全局 Vision Skill 和 Windows 登录启动入口复制到当前用户目录，并备份已有文件。成功时应看到：
@@ -317,10 +339,11 @@ CC Switch startup now waits for the bridge health check
 
 如果看到 `No recognizable CC Switch startup entry was found`，安装器没有接管 CC Switch 的启动顺序；先在 CC Switch 中开启开机启动，完全退出并重新打开，再重新运行安装器。
 
-安装后完全退出并重新打开 PowerShell、CC Switch 和 Claude Code，使它们继承新的用户环境变量。然后启动并检查桥：
+安装后完全退出并重新打开 PowerShell、CC Switch 和 Claude Code，使它们继承新的用户环境变量。然后使用已安装的重启脚本加载新配置并检查桥：
 
 ```powershell
-& "$env:USERPROFILE\.claude\bridge\start-vision-bridge.ps1"
+powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass `
+  -File "$env:USERPROFILE\.claude\bridge\restart-vision-bridge.ps1"
 
 $healthHeaders = @{}
 if ($env:BRIDGE_AUTH_TOKEN) {
@@ -343,23 +366,53 @@ ok      service       version
 True    vision-bridge 0.2.1
 ```
 
-### 4. 修改 CC Switch 路由
+### 4. 配置路由器或 Claude Code
 
-只修改当前 DeepSeek 供应商的目标地址：
+按当前模式完成对应配置。桥不会代替使用者编辑 CC Switch 或其他路由器：
+
+**CC Switch 模式**：在当前实际使用的 app 类型和活动 DeepSeek 供应商中填写配置块里的：
 
 ```text
-目标地址：  http://127.0.0.1:15720
-UPSTREAM：  修改前的真实 DeepSeek Base URL
+API Key：纯文本 DeepSeek 模型的 API Key
+Model：   纯文本 DeepSeek 模型的 Model
+目标地址：http://127.0.0.1:15720
 ```
 
-不要把 `UPSTREAM` 也改成本地桥地址，否则会形成自代理循环。只修改当前实际使用的 app 类型和活动供应商，不要修改 `input_modalities` 或其他供应商。修改后完全重启 Claude Code，并先测试一条无图片文本请求，再直接粘贴图片。
+不要把纯文本模型的真实 Base URL 继续作为 CC Switch 的目标；它已经写入 `UPSTREAM`，由桥转发。不要修改 `input_modalities` 或其他供应商。修改后完全重启 Claude Code，并先测试一条无图片文本请求，再直接粘贴图片。更换文本 Base URL 或 API Key 的方式见[上面的说明](#更换文本-deepseek-上游)。
+
+**其他路由器模式**：让现有路由器的目标指向 `http://127.0.0.1:15720`，并保留它自己的文本 API Key/Model；使用 `diagnose-vision-bridge.ps1 -SkipCCSwitch -ExpectedRoutePort <现有路由器端口>` 检查 Claude Code 到路由器的配置，端口未知时使用 `-SkipRouteCheck`，不要猜测或编辑未知路由器的配置。
+
+**直连桥模式**：让 Claude Code 的 `ANTHROPIC_BASE_URL` 指向 `http://127.0.0.1:15720`，并在 Claude Code 或后面的适配器中配置文本 API Key/Model。此时 `UPSTREAM` 必须直接接收 Anthropic Messages，或是一个能接收 Anthropic Messages 并自行转换的适配器入口。桥不会替适配器做协议转换；一个原生 OpenAI-only DeepSeek URL 不能直接使用。
 
 ### 5. 重启验收
 
-先运行只读诊断：
+先运行只读诊断。CC Switch 模式使用：
 
 ```powershell
 powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "$env:USERPROFILE\.claude\bridge\diagnose-vision-bridge.ps1"
+```
+
+其他路由器模式使用（把端口替换为现有路由器端口）：
+
+```powershell
+powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass `
+  -File "$env:USERPROFILE\.claude\bridge\diagnose-vision-bridge.ps1" `
+  -SkipCCSwitch -ExpectedRoutePort <现有路由器端口>
+```
+
+如果现有路由器端口未知，使用：
+
+```powershell
+powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass `
+  -File "$env:USERPROFILE\.claude\bridge\diagnose-vision-bridge.ps1" `
+  -SkipCCSwitch -SkipRouteCheck
+```
+
+直连桥模式使用：
+
+```powershell
+powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass `
+  -File "$env:USERPROFILE\.claude\bridge\diagnose-vision-bridge.ps1" -SkipCCSwitch
 ```
 
 确认诊断通过后，先由使用者决定是否重启 Windows。重启后登录并等待约 10-30 秒，直接打开 Claude Code，不需要手动启动桥。若仍出现 gateway connection error，先看 `diagnose-vision-bridge.ps1`、`vision-bridge.err.log` 和 `cc-switch-startup.log`，不要先改模型映射。
@@ -379,7 +432,7 @@ node "$env:USERPROFILE\.claude\skills\vision\vision.js" --url "https://example.c
 
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |
-| `VISION_API_KEY` | 无 | StepFun 或兼容视觉服务的 API Key；必须通过环境变量提供 |
+| `VISION_API_KEY` | 无 | 兼容视觉服务的 API Key；必须通过环境变量提供 |
 | `VISION_BASE_URL` | `https://api.stepfun.com/v1` | 视觉服务 Base URL |
 | `VISION_MODEL` | `step-3.7-flash` | 视觉模型 ID |
 | `UPSTREAM` | 无 | 原始 DeepSeek 文本上游 Base URL |
@@ -421,7 +474,7 @@ node "$env:USERPROFILE\.claude\skills\vision\vision.js" --url "https://example.c
 - 桥默认只监听 `127.0.0.1`。这适用于本机进程均可信的个人电脑。
 - 如果将 `BRIDGE_HOST` 改为局域网或其他非 loopback 地址，必须设置 `BRIDGE_AUTH_TOKEN`；否则桥会拒绝启动。
 - 共享电脑上建议启用令牌，并确认 CC Switch 支持注入 `x-bridge-token`。令牌会在转发到上游前删除。
-- 图片会发送给 StepFun 或你配置的视觉服务。不要提交包含密码、令牌、私密代码或不应外传数据的截图。
+- 图片会发送给你配置的视觉服务。不要提交包含密码、令牌、私密代码或不应外传数据的截图。
 - `VISION_BASE_URL` 和 `UPSTREAM` 默认要求 HTTPS；只有 loopback HTTP 可用于本地服务和测试。`ALLOW_INSECURE_HTTP=1` 会明文传输凭据和图片，仅用于你明确接受风险的场景。
 - 日志保存在 `%USERPROFILE%\.claude\bridge\vision-bridge.log` 和 `vision-bridge.err.log`，桥不会主动记录 API Key 或图片 base64。
 
@@ -441,7 +494,7 @@ node "$env:USERPROFILE\.claude\skills\vision\vision.js" --url "https://example.c
 
 ## 测试与开发
 
-本项目无运行时依赖，要求 Node.js 18+。测试使用本地 mock 服务，不访问 StepFun，也不读取真实 API Key：
+本项目无运行时依赖，要求 Node.js 18+。测试使用本地 mock 服务，不访问真实视觉服务，也不读取真实 API Key：
 
 ```powershell
 npm.cmd run check
@@ -461,6 +514,7 @@ Smoke test 覆盖图片转换、无图透传、`/v1` 路径、查询参数、chu
 | `src/start-ccswitch-after-bridge.vbs` | 等待桥健康后再启动已存在的 CC Switch 登录命令 |
 | `src/restore-ccswitch-startup.ps1` | 恢复安装器包装前的 CC Switch 登录命令 |
 | `src/install-vision-bridge.ps1` | 暂存、备份并安装桥、Vision Skill 和 Startup 入口 |
+| `src/restart-vision-bridge.ps1` | 重新加载用户级配置并安全重启已安装的桥 |
 | `src/diagnose-vision-bridge.ps1` | 只读检查桥、CC Switch 代理和 Claude Code 路由 |
 | `src/SKILL.md.template` | 全局 Vision Skill 模板 |
 | `test/bridge-smoke-test.js` | 无真实 API Key 的边界 smoke test |
