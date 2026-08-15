@@ -923,11 +923,12 @@ async function main() {
     assert.equal(upstreamOld.requests, 2);
     assert.match(JSON.stringify(upstreamNew.payloads.at(-1)), /restart-new-vision-description/);
     trace("successful restart request passed");
+    // Keep preflight configuration valid so this failure exercises post-stop rollback.
     const failedRestart = runRestart(
       restartCase.root,
       restartCase.port,
       "http://127.0.0.1:" + upstreamNewPort + "/v1",
-      { VISION_BASE_URL: "http://[invalid" },
+      { BRIDGE_MAX_BODY_BYTES: "invalid" },
     );
     trace(`failed restart result status=${failedRestart.status}`);
     assert.notEqual(failedRestart.status, 0, failedRestart.stdout + "\n" + failedRestart.stderr);
