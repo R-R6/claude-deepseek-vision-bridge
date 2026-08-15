@@ -338,6 +338,17 @@ sh "$HOME/.claude/bridge/restart-vision-bridge.sh"
 sh "$HOME/.claude/bridge/diagnose-vision-bridge.sh" --skip-ccswitch
 ```
 
+### macOS 安全重装
+
+如果当前 Claude 会话本身经 Bridge 路由，不要在会话内分步执行 `launchctl bootout`、移动 `~/.claude/bridge` 或手工重建 LaunchAgent。使用已安装的单一重装入口，并从独立 Terminal 启动：
+
+```sh
+sh "$HOME/.claude/bridge/reinstall-vision-bridge.sh" \
+  --env-file "$HOME/.claude/bridge/bridge.env"
+```
+
+该入口只委托事务式 Bridge 安装器，不修改 CC Switch SQLite、供应商或路由。安装器会在替换现有运行时前保留最后一次健康 Bridge 状态；安装过程收到中断、或新 Bridge 启动/健康检查失败时，会恢复旧运行时并重新验证 `/health`。`restart-vision-bridge.sh` 也使用同一受保护状态执行失败回滚。重装完成并确认健康后，按上一节单独执行 CC Switch 路由检查或切换；不要把路由切换参数传给重装入口。
+
 默认只安装 Vision Bridge 的 LaunchAgent，不接管 CC Switch 的登录启动。若明确希望在桥健康后由 launchd 启动 `/Applications/CC Switch.app`，再显式加上：
 
 ```sh

@@ -28,6 +28,7 @@ bridge_agent_was_loaded=0
 coordinator_agent_was_loaded=0
 bridge_agent_changed=0
 coordinator_agent_changed=0
+install_succeeded=0
 
 usage() {
     cat <<'EOF'
@@ -187,13 +188,60 @@ restore_launch_agents() {
         launchctl kickstart "$launch_domain/$CCSWITCH_COORDINATOR_LABEL" >/dev/null 2>&1 || true
     fi
 }
+verify_restored_health() (
+    [ "$bridge_agent_was_loaded" -eq 1 ] || exit 0
+    [ -f "$bridge_dir/bridge.env" ] || exit 1
+    [ -f "$bridge_dir/bridge-health.js" ] || exit 1
+    set -a
+    # shellcheck disable=SC1090
+    . "$bridge_dir/bridge.env"
+    set +a
+    rollback_host=${BRIDGE_HOST:-127.0.0.1}
+    rollback_port=${BRIDGE_PORT:-15720}
+    rollback_node=${BRIDGE_NODE:-$NODE_PATH}
+    rollback_timeout=${BRIDGE_STARTUP_TIMEOUT_MS:-30000}
+    case "$rollback_timeout" in ''|*[!0-9]*) rollback_timeout=30000 ;; esac
+    case "$rollback_host" in
+        0.0.0.0) rollback_health_url="http://127.0.0.1:${rollback_port}/health" ;;
+        ::) rollback_health_url="http://[::1]:${rollback_port}/health" ;;
+        *:*) rollback_health_url="http://[${rollback_host}]:${rollback_port}/health" ;;
+        *) rollback_health_url="http://${rollback_host}:${rollback_port}/health" ;;
+    esac
+    rollback_deadline=$(( $(date +%s) + (rollback_timeout + 999) / 1000 ))
+    while [ "$(date +%s)" -le "$rollback_deadline" ]; do
+        if BRIDGE_EXPECTED_VERSION=0.2.1 BRIDGE_HEALTH_TIMEOUT_MS=2000 \
+            "$rollback_node" "$bridge_dir/bridge-health.js" "$rollback_health_url" >/dev/null 2>&1; then
+            exit 0
+        fi
+        sleep 0.25
+    done
+    exit 1
+)
 rollback_install() {
     rollback_launch_agents
     rollback_files
     restore_launch_agents
+    if ! verify_restored_health; then
+        printf '%s\n' "Warning: restored Vision Bridge did not pass its health check; inspect the install backup." >&2
+    fi
     cleanup
 }
-trap 'rollback_install' EXIT HUP INT TERM
+
+finish_install() {
+    exit_code=$?
+    trap - EXIT HUP INT TERM
+    if [ "$install_succeeded" -eq 0 ]; then
+        set +e
+        rollback_install
+    else
+        cleanup
+    fi
+    exit "$exit_code"
+}
+trap finish_install EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 generate_plist() {
     output=$1
@@ -272,6 +320,26 @@ stage_generated_file() {
 }
 
 mkdir -p "$stage_root" "$bridge_dir" "$skill_dir" "$LAUNCH_AGENTS_DIR"
+
+# Preserve the previous service files before staging any replacement. The
+# restart script uses this last-known-good snapshot if the new service fails.
+if [ -f "$bridge_dir/bridge.env" ] && [ -f "$plist_path" ] &&
+    [ -f "$bridge_dir/vision-bridge.js" ] && [ -f "$bridge_dir/start-vision-bridge.sh" ]; then
+    BRIDGE_DIR="$bridge_dir" BRIDGE_PLIST="$plist_path"
+    # shellcheck disable=SC1090
+    . "$SCRIPT_DIR/bridge-rollback-state.sh"
+    set +e
+    previous_snapshot=$(bridge_rollback_current_snapshot 2>/dev/null)
+    previous_snapshot_status=$?
+    set -e
+    if [ "$previous_snapshot_status" -eq 2 ]; then
+        fail "the protected previous Vision Bridge snapshot is invalid"
+    fi
+    if [ "$previous_snapshot_status" -eq 1 ]; then
+        bridge_rollback_snapshot_current || fail "could not save the protected previous Vision Bridge snapshot"
+    fi
+fi
+
 generate_plist \
     "${stage_root}/vision-bridge.plist" "$BRIDGE_LABEL" \
     "$bridge_dir/start-vision-bridge.sh" "$bridge_dir" "$NODE_PATH" \
@@ -292,7 +360,9 @@ stage_file "$SCRIPT_DIR/vision-bridge.js" "$bridge_dir/vision-bridge.js" bridge 
 stage_file "$SCRIPT_DIR/vision-client.js" "$bridge_dir/vision-client.js" bridge 644
 stage_file "$SCRIPT_DIR/bridge-health.js" "$bridge_dir/bridge-health.js" bridge 755
 stage_file "$SCRIPT_DIR/start-vision-bridge.sh" "$bridge_dir/start-vision-bridge.sh" bridge 755
+stage_file "$SCRIPT_DIR/bridge-rollback-state.sh" "$bridge_dir/bridge-rollback-state.sh" bridge 755
 stage_file "$SCRIPT_DIR/restart-vision-bridge.sh" "$bridge_dir/restart-vision-bridge.sh" bridge 755
+stage_file "$SCRIPT_DIR/reinstall-vision-bridge.sh" "$bridge_dir/reinstall-vision-bridge.sh" bridge 755
 stage_file "$SCRIPT_DIR/diagnose-vision-bridge.sh" "$bridge_dir/diagnose-vision-bridge.sh" bridge 755
 stage_file "$SCRIPT_DIR/configure-ccswitch-route.js" "$bridge_dir/configure-ccswitch-route.js" bridge 755
 stage_file "$SCRIPT_DIR/configure-ccswitch-route.sh" "$bridge_dir/configure-ccswitch-route.sh" bridge 755
@@ -359,8 +429,8 @@ if [ "$SKIP_LAUNCHCTL" -eq 0 ]; then
     launch_domain="gui/$(id -u)"
     if launchctl print "$launch_domain/$BRIDGE_LABEL" >/dev/null 2>&1; then
         bridge_agent_was_loaded=1
-        launchctl bootout "$launch_domain/$BRIDGE_LABEL" >/dev/null 2>&1 || fail "could not unload the existing $BRIDGE_LABEL agent"
         bridge_agent_changed=1
+        launchctl bootout "$launch_domain/$BRIDGE_LABEL" >/dev/null 2>&1 || fail "could not unload the existing $BRIDGE_LABEL agent"
     fi
     launchctl bootstrap "$launch_domain" "$plist_path" || fail "could not load $plist_path"
     bridge_agent_changed=1
@@ -392,8 +462,8 @@ if [ "$SKIP_LAUNCHCTL" -eq 0 ]; then
     if [ "$COORDINATE_CCSWITCH" -eq 1 ]; then
         if launchctl print "$launch_domain/$CCSWITCH_COORDINATOR_LABEL" >/dev/null 2>&1; then
             coordinator_agent_was_loaded=1
-            launchctl bootout "$launch_domain/$CCSWITCH_COORDINATOR_LABEL" >/dev/null 2>&1 || fail "could not unload the existing $CCSWITCH_COORDINATOR_LABEL agent"
             coordinator_agent_changed=1
+            launchctl bootout "$launch_domain/$CCSWITCH_COORDINATOR_LABEL" >/dev/null 2>&1 || fail "could not unload the existing $CCSWITCH_COORDINATOR_LABEL agent"
         fi
         launchctl bootstrap "$launch_domain" "$coordinator_plist_path" || fail "could not load $coordinator_plist_path"
         coordinator_agent_changed=1
@@ -401,6 +471,7 @@ if [ "$SKIP_LAUNCHCTL" -eq 0 ]; then
     fi
 fi
 
+install_succeeded=1
 trap - EXIT HUP INT TERM
 cleanup
 

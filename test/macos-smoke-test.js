@@ -180,6 +180,61 @@ esac
 `);
 }
 
+function writeInterruptingLaunchctl(filePath) {
+  writeExecutable(filePath, String.raw`#!/bin/sh
+set -eu
+printf '%s\n' "$*" >> "$FAKE_LAUNCHCTL_LOG"
+case "$1" in
+  print|kickstart) exit 0 ;;
+  bootout)
+    if [ ! -f "$FAKE_LAUNCHCTL_INTERRUPTED" ]; then
+      : > "$FAKE_LAUNCHCTL_INTERRUPTED"
+      kill -TERM "$PPID"
+    fi
+    exit 0
+    ;;
+  bootstrap) exit 0 ;;
+  *) exit 1 ;;
+esac
+`);
+}
+
+function writeManagedLaunchctl(filePath) {
+  writeExecutable(filePath, String.raw`#!/bin/sh
+set -eu
+printf '%s\n' "$*" >> "$FAKE_LAUNCHCTL_LOG"
+state="$FAKE_LAUNCHCTL_STATE"
+stop_bridge() {
+  if [ -f "$state" ]; then
+    pid=$(cat "$state")
+    kill "$pid" 2>/dev/null || true
+    rm -f "$state"
+  fi
+}
+start_bridge() {
+  stop_bridge
+  sh "$BRIDGE_DIR/start-vision-bridge.sh" --foreground >> "$FAKE_LAUNCHCTL_BRIDGE_LOG" 2>&1 &
+  printf '%s\n' "$!" > "$state"
+}
+case "$1" in
+  print)
+    if [ -f "$state" ] && kill -0 "$(cat "$state")" 2>/dev/null; then exit 0; fi
+    rm -f "$state"
+    exit 1
+    ;;
+  bootout) stop_bridge; exit 0 ;;
+  bootstrap) start_bridge; exit 0 ;;
+  kickstart)
+    if [ "\${2:-}" = -k ]; then stop_bridge; fi
+    start_bridge
+    exit 0
+    ;;
+  *) exit 1
+    ;;
+esac
+`);
+}
+
 async function main() {
   const DatabaseSync = getDatabaseSync();
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "vision bridge mac-"));
@@ -249,6 +304,7 @@ async function main() {
     "VISION_API_KEY=mac-startup-test-secret",
     "BRIDGE_HOST=127.0.0.1",
     `BRIDGE_PORT=${bridgePort}`,
+    "BRIDGE_STARTUP_TIMEOUT_MS=1000",
     `BRIDGE_NODE=${nodePath}`,
   ].join("\n") + "\n", { mode: 0o600 });
 
@@ -327,6 +383,36 @@ printf '%s\n' "17"
     assert.match(rollbackCalls, /^bootout /m);
     assert.match(rollbackCalls, /^kickstart /m);
 
+    const interruptHome = path.join(root, "Interrupted Install Home");
+    const interruptLaunchAgents = path.join(interruptHome, "Library", "LaunchAgents");
+    const interruptPlist = path.join(interruptLaunchAgents, "com.claude.deepseek-vision-bridge.plist");
+    const interruptBin = path.join(root, "interrupt-launchctl-bin");
+    const interruptLog = path.join(root, "interrupt-launchctl.log");
+    const interruptMarker = path.join(root, "interrupt-launchctl.marker");
+    const originalInterruptPlist = "old interrupted launch agent contents\n";
+    fs.mkdirSync(interruptLaunchAgents, { recursive: true });
+    fs.mkdirSync(interruptBin, { recursive: true });
+    fs.writeFileSync(interruptPlist, originalInterruptPlist, "utf8");
+    writeInterruptingLaunchctl(path.join(interruptBin, "launchctl"));
+    const interruptResult = run("sh", [
+      path.join(sourceDir, "install-vision-bridge.sh"),
+      "--env-file", envFile,
+      "--bridge-port", String(bridgePort),
+    ], {
+      env: {
+        ...process.env,
+        HOME: interruptHome,
+        PATH: `${interruptBin}:${process.env.PATH}`,
+        FAKE_LAUNCHCTL_LOG: interruptLog,
+        FAKE_LAUNCHCTL_INTERRUPTED: interruptMarker,
+      },
+    });
+    assert.notEqual(interruptResult.status, 0);
+    assert.equal(fs.readFileSync(interruptPlist, "utf8"), originalInterruptPlist);
+    const interruptCalls = fs.readFileSync(interruptLog, "utf8");
+    assert.equal((interruptCalls.match(/^bootstrap /gm) || []).length, 1);
+    assert.match(interruptCalls, /^bootout /m);
+
     const installer = run("sh", [
       path.join(sourceDir, "install-vision-bridge.sh"),
       "--env-file", envFile,
@@ -348,7 +434,9 @@ printf '%s\n' "17"
       ".claude/bridge/vision-client.js",
       ".claude/bridge/bridge-health.js",
       ".claude/bridge/start-vision-bridge.sh",
+      ".claude/bridge/bridge-rollback-state.sh",
       ".claude/bridge/restart-vision-bridge.sh",
+      ".claude/bridge/reinstall-vision-bridge.sh",
       ".claude/bridge/diagnose-vision-bridge.sh",
       ".claude/bridge/configure-ccswitch-route.js",
       ".claude/bridge/configure-ccswitch-route.sh",
@@ -365,6 +453,68 @@ printf '%s\n' "17"
     assert.doesNotMatch(fs.readFileSync(coordinatorLaunchAgent, "utf8"), /mac-startup-test-secret/);
     assert.equal((fs.statSync(path.join(bridgeDir, "bridge.env")).mode & 0o077), 0);
     assert.notEqual(fs.statSync(path.join(home, ".claude", "skills", "vision", "vision.sh")).mode & 0o111, 0);
+    const routeRejectedByReinstall = run("sh", [
+      path.join(bridgeDir, "reinstall-vision-bridge.sh"),
+      "--configure-ccswitch-route",
+    ], { env: { ...process.env, HOME: home } });
+    assert.equal(routeRejectedByReinstall.status, 2);
+    assert.match(
+      `${routeRejectedByReinstall.stdout}\n${routeRejectedByReinstall.stderr}`,
+      /does not modify CC Switch routes/,
+    );
+
+    const managedLaunchctlDirectory = path.join(root, "managed-launchctl-bin");
+    const managedLaunchctlLog = path.join(root, "managed-launchctl.log");
+    const managedBridgeLog = path.join(root, "managed-bridge.log");
+    const managedLaunchctlState = path.join(root, "managed-launchctl.state");
+    fs.mkdirSync(managedLaunchctlDirectory, { recursive: true });
+    writeManagedLaunchctl(path.join(managedLaunchctlDirectory, "launchctl"));
+    const managedEnvironment = {
+      ...process.env,
+      HOME: home,
+      BRIDGE_DIR: bridgeDir,
+      BRIDGE_ENV_FILE: path.join(bridgeDir, "bridge.env"),
+      BRIDGE_PLIST: launchAgent,
+      BRIDGE_NODE: nodePath,
+      PATH: `${managedLaunchctlDirectory}:${process.env.PATH}`,
+      FAKE_LAUNCHCTL_LOG: managedLaunchctlLog,
+      FAKE_LAUNCHCTL_BRIDGE_LOG: managedBridgeLog,
+      FAKE_LAUNCHCTL_STATE: managedLaunchctlState,
+    };
+    const launchDomain = `gui/${process.getuid()}`;
+    assert.equal(
+      run(path.join(managedLaunchctlDirectory, "launchctl"), ["bootstrap", launchDomain, launchAgent], {
+        env: managedEnvironment,
+      }).status,
+      0,
+    );
+    await waitForHealth(bridgePort);
+    const healthyRestart = await runAsync("sh", [path.join(bridgeDir, "restart-vision-bridge.sh")], {
+      env: managedEnvironment,
+    });
+    assert.equal(healthyRestart.status, 0, `${healthyRestart.stdout}\n${healthyRestart.stderr}`);
+    assert.match(healthyRestart.stdout, /passed health check/);
+    assert.equal(fs.existsSync(path.join(bridgeDir, "rollback", "current")), true);
+
+    const bridgeScriptPath = path.join(bridgeDir, "vision-bridge.js");
+    const healthyBridgeScript = fs.readFileSync(bridgeScriptPath, "utf8");
+    fs.writeFileSync(bridgeScriptPath, "this is not valid JavaScript\n", "utf8");
+    const failedRestart = await runAsync("sh", [path.join(bridgeDir, "restart-vision-bridge.sh")], {
+      env: managedEnvironment,
+    });
+    assert.notEqual(failedRestart.status, 0);
+    assert.match(
+      `${failedRestart.stdout}\n${failedRestart.stderr}`,
+      /Previous Vision Bridge configuration was restored and passed its health check/,
+    );
+    assert.equal(fs.readFileSync(bridgeScriptPath, "utf8"), healthyBridgeScript);
+    await waitForHealth(bridgePort);
+    assert.equal(
+      run(path.join(managedLaunchctlDirectory, "launchctl"), ["bootout", `${launchDomain}/${"com.claude.deepseek-vision-bridge"}`], {
+        env: managedEnvironment,
+      }).status,
+      0,
+    );
 
     if (DatabaseSync && !ccSwitchProcessRunning) {
       const routeEnvironment = { ...process.env };
