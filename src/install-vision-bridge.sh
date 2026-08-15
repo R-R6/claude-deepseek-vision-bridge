@@ -22,6 +22,7 @@ ENV_FILE_SOURCE=
 SKIP_LAUNCHCTL=0
 COORDINATE_CCSWITCH=0
 CONFIGURE_ROUTE=0
+FORCE_CLOSE_CCSWITCH=0
 launch_domain=
 bridge_agent_was_loaded=0
 coordinator_agent_was_loaded=0
@@ -40,6 +41,7 @@ Options:
   --ccswitch-app PATH             CC Switch app bundle (default: /Applications/CC Switch.app).
   --app-type TYPE                 auto, claude, or claude-desktop (default: auto).
   --configure-ccswitch-route      Health-check bridge, back up SQLite, update active route.
+  --force-close-ccswitch          With route configuration, close/restart the verified CC Switch app.
   --coordinate-ccswitch-startup   Start CC Switch from a separate launchd coordinator.
   --skip-launchctl                Install files without loading launch agents (for testing).
   --help                          Show this help.
@@ -79,6 +81,7 @@ while [ "$#" -gt 0 ]; do
             shift
             ;;
         --configure-ccswitch-route) CONFIGURE_ROUTE=1 ;;
+        --force-close-ccswitch) FORCE_CLOSE_CCSWITCH=1 ;;
         --coordinate-ccswitch-startup) COORDINATE_CCSWITCH=1 ;;
         --skip-launchctl) SKIP_LAUNCHCTL=1 ;;
         --help) usage; exit 0 ;;
@@ -126,6 +129,9 @@ if [ "$COORDINATE_CCSWITCH" -eq 1 ] && [ ! -d "$CCSWITCH_APP_PATH" ]; then
 fi
 if [ "$CONFIGURE_ROUTE" -eq 1 ] && [ "$SKIP_LAUNCHCTL" -eq 1 ]; then
     fail "--configure-ccswitch-route requires launchd loading; remove --skip-launchctl"
+fi
+if [ "$FORCE_CLOSE_CCSWITCH" -eq 1 ] && [ "$CONFIGURE_ROUTE" -eq 0 ]; then
+    fail "--force-close-ccswitch requires --configure-ccswitch-route"
 fi
 
 bridge_dir=${INSTALL_HOME}/.claude/bridge
@@ -289,6 +295,7 @@ stage_file "$SCRIPT_DIR/start-vision-bridge.sh" "$bridge_dir/start-vision-bridge
 stage_file "$SCRIPT_DIR/restart-vision-bridge.sh" "$bridge_dir/restart-vision-bridge.sh" bridge 755
 stage_file "$SCRIPT_DIR/diagnose-vision-bridge.sh" "$bridge_dir/diagnose-vision-bridge.sh" bridge 755
 stage_file "$SCRIPT_DIR/configure-ccswitch-route.js" "$bridge_dir/configure-ccswitch-route.js" bridge 755
+stage_file "$SCRIPT_DIR/configure-ccswitch-route.sh" "$bridge_dir/configure-ccswitch-route.sh" bridge 755
 stage_file "$SCRIPT_DIR/start-ccswitch-after-bridge.sh" "$bridge_dir/start-ccswitch-after-bridge.sh" bridge 755
 stage_file "$SCRIPT_DIR/vision.js" "$skill_dir/vision.js" skill 755
 stage_file "$SCRIPT_DIR/vision.sh" "$skill_dir/vision.sh" skill 755
@@ -366,12 +373,25 @@ if [ "$SKIP_LAUNCHCTL" -eq 0 ]; then
             . "$bridge_dir/bridge.env"
             set +a
         fi
-        "$NODE_PATH" "$bridge_dir/configure-ccswitch-route.js" \
-            --cc-switch-directory "$CCSWITCH_DIR" \
-            --app-type "$CCSWITCH_APP_TYPE" \
-            --bridge-host "$BRIDGE_HOST" \
-            --bridge-port "$BRIDGE_PORT" \
-            --bridge-env-file "$bridge_dir/bridge.env"
+        route_coordinator="$bridge_dir/configure-ccswitch-route.sh"
+        if [ "$FORCE_CLOSE_CCSWITCH" -eq 1 ]; then
+            "$route_coordinator" \
+                --ccswitch-directory "$CCSWITCH_DIR" \
+                --ccswitch-app "$CCSWITCH_APP_PATH" \
+                --app-type "$CCSWITCH_APP_TYPE" \
+                --bridge-host "$BRIDGE_HOST" \
+                --bridge-port "$BRIDGE_PORT" \
+                --bridge-env-file "$bridge_dir/bridge.env" \
+                --force-close-ccswitch
+        else
+            "$route_coordinator" \
+                --ccswitch-directory "$CCSWITCH_DIR" \
+                --ccswitch-app "$CCSWITCH_APP_PATH" \
+                --app-type "$CCSWITCH_APP_TYPE" \
+                --bridge-host "$BRIDGE_HOST" \
+                --bridge-port "$BRIDGE_PORT" \
+                --bridge-env-file "$bridge_dir/bridge.env"
+        fi
     fi
     if [ "$COORDINATE_CCSWITCH" -eq 1 ]; then
         if launchctl print "$launch_domain/$CCSWITCH_COORDINATOR_LABEL" >/dev/null 2>&1; then

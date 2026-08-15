@@ -348,6 +348,7 @@ printf '%s\n' "17"
       ".claude/bridge/restart-vision-bridge.sh",
       ".claude/bridge/diagnose-vision-bridge.sh",
       ".claude/bridge/configure-ccswitch-route.js",
+      ".claude/bridge/configure-ccswitch-route.sh",
       ".claude/bridge/bridge.env",
       ".claude/skills/vision/vision.js",
       ".claude/skills/vision/vision.sh",
@@ -398,6 +399,50 @@ printf '%s\n' "17"
       assert.equal(readRoute(DatabaseSync, databasePath), `http://127.0.0.1:${authenticatedHealthPort}`);
       assert.equal(readProviderValue(DatabaseSync, databasePath, "$.env.ANTHROPIC_AUTH_TOKEN"), "mac-route-test-secret");
       assert.doesNotMatch(`${authenticatedRouteResult.stdout}\n${authenticatedRouteResult.stderr}`, /mac-route-health-token|mac-route-test-secret/);
+
+      const heldDatabase = new DatabaseSync(databasePath);
+      try {
+        const noOpWhileRunningResult = await runAsync(nodePath, [
+          path.join(sourceDir, "configure-ccswitch-route.js"),
+          "--database", databasePath,
+          "--settings", settingsPath,
+          "--app-type", "claude-desktop",
+          "--bridge-port", String(authenticatedHealthPort),
+          "--bridge-env-file", authenticatedBridgeEnvFile,
+        ], { env: routeEnvironment });
+        assert.equal(
+          noOpWhileRunningResult.status,
+          0,
+          `${noOpWhileRunningResult.stdout}\n${noOpWhileRunningResult.stderr}`,
+        );
+        assert.match(noOpWhileRunningResult.stdout, /already targets/);
+        assert.doesNotMatch(
+          `${noOpWhileRunningResult.stdout}\n${noOpWhileRunningResult.stderr}`,
+          /mac-route-health-token|mac-route-test-secret/,
+        );
+
+        heldDatabase.prepare(
+          "UPDATE providers SET settings_config = json_set(settings_config, '$.env.ANTHROPIC_BASE_URL', ?)",
+        ).run("https://text.example/v1");
+        const wrapperEnvironment = { ...routeEnvironment, BRIDGE_DIR: sourceDir };
+        const refusedWhileRunningResult = await runAsync("sh", [
+          path.join(sourceDir, "configure-ccswitch-route.sh"),
+          "--ccswitch-directory", routeDir,
+          "--database", databasePath,
+          "--settings", settingsPath,
+          "--app-type", "claude-desktop",
+          "--bridge-port", String(authenticatedHealthPort),
+          "--bridge-env-file", authenticatedBridgeEnvFile,
+        ], { env: wrapperEnvironment });
+        assert.notEqual(refusedWhileRunningResult.status, 0);
+        assert.match(
+          `${refusedWhileRunningResult.stdout}\n${refusedWhileRunningResult.stderr}`,
+          /CC Switch was not changed|database is in use/,
+        );
+        assert.equal(readRoute(DatabaseSync, databasePath), "https://text.example/v1");
+      } finally {
+        heldDatabase.close();
+      }
 
       const bypassResult = run(nodePath, [
         path.join(sourceDir, "configure-ccswitch-route.js"),

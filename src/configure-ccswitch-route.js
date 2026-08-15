@@ -298,20 +298,45 @@ async function main() {
   const options = parseArgs(process.argv.slice(2));
   const DatabaseSync = loadSqlite();
   const settings = loadSettings(options.settingsPath);
-  if (!options.status) assertDatabaseIsNotInUse(options.databasePath);
-  const database = loadDatabase(DatabaseSync, options.databasePath, options.status);
+
+  // Read the current route before checking for a write lock. This makes a
+  // repeated install a harmless no-op while CC Switch is still running.
+  const readDatabase = loadDatabase(DatabaseSync, options.databasePath, true);
+  let row;
+  let target;
+  let currentRoute;
   try {
-    const row = chooseProvider(currentProviderRows(database, options.appType), settings, options.appType);
+    row = chooseProvider(currentProviderRows(readDatabase, options.appType), settings, options.appType);
     if (options.status) {
-      reportStatus(database, row);
+      reportStatus(readDatabase, row);
       return;
     }
-    const target = bridgeUrl(options);
-    const currentRoute = readProviderRoute(database, row);
-    const bridgeAuthToken = readBridgeAuthToken(options.bridgeEnvFile);
-    await checkBridgeHealth(options, bridgeAuthToken);
-    if (currentRoute === target && !options.force) {
-      process.stdout.write(`CC Switch ${row.app_type} route already targets ${target}.\n`);
+    target = bridgeUrl(options);
+    currentRoute = readProviderRoute(readDatabase, row);
+  } finally {
+    readDatabase.close();
+  }
+
+  const bridgeAuthToken = readBridgeAuthToken(options.bridgeEnvFile);
+  await checkBridgeHealth(options, bridgeAuthToken);
+  if (currentRoute === target && !options.force) {
+    process.stdout.write(`CC Switch ${row.app_type} route already targets ${target}.\n`);
+    return;
+  }
+
+  assertDatabaseIsNotInUse(options.databasePath);
+  const database = loadDatabase(DatabaseSync, options.databasePath);
+  try {
+    // Re-read after the lock check so a concurrent provider change cannot be
+    // overwritten based on the earlier read-only snapshot.
+    const writableRow = chooseProvider(
+      currentProviderRows(database, options.appType),
+      settings,
+      options.appType,
+    );
+    const writableRoute = readProviderRoute(database, writableRow);
+    if (writableRoute === target && !options.force) {
+      process.stdout.write(`CC Switch ${writableRow.app_type} route already targets ${target}.\n`);
       return;
     }
 
@@ -329,9 +354,9 @@ async function main() {
     try {
       const result = database.prepare(
         "UPDATE providers SET settings_config = json_set(settings_config, '$.env.ANTHROPIC_BASE_URL', ?) WHERE id = ? AND app_type = ?",
-      ).run(target, row.id, row.app_type);
+      ).run(target, writableRow.id, writableRow.app_type);
       if (result.changes !== 1) throw new Error("CC Switch provider route update affected an unexpected number of rows");
-      if (readProviderRoute(database, row) !== target) {
+      if (readProviderRoute(database, writableRow) !== target) {
         throw new Error("CC Switch provider route verification failed");
       }
       database.exec("COMMIT");
@@ -340,7 +365,7 @@ async function main() {
       throw error;
     }
     process.stdout.write(
-      `CC Switch ${row.app_type} route now targets healthy Vision Bridge at ${target}. Backup: ${backupPath}\n`,
+      `CC Switch ${writableRow.app_type} route now targets healthy Vision Bridge at ${target}. Backup: ${backupPath}\n`,
     );
   } finally {
     database.close();
