@@ -234,17 +234,17 @@ https://github.com/R-R6/claude-deepseek-vision-bridge
 CC Switch 路由处理：自动配置当前活动供应商到 Vision Bridge
 CC Switch app 类型：claude-desktop
 
-严格使用以下配置，不要猜测、替换或要求重复提供：
+本次安装使用以下配置。请按字段使用这些值，不要猜测、替换或要求我重复提供：
 
 纯文本 DeepSeek 模型：
-- Base URL: https://tokenrhythm.studio/v1
-- API Key: 已在 CC Switch 中配置
-- Model: deepseek-v4-flash-0731
+- Base URL: <真实文本模型 Base URL>
+- API Key: <文本模型 API Key；如果路由模式为 CC Switch 已配置，填写“已在 CC Switch 中配置”>
+- Model: <文本模型 ID；如果路由模式为 CC Switch 已配置，填写“已在 CC Switch 中配置”>
 
 视觉模型：
-- Base URL: https://api.stepfun.com/v1
-- API Key: 使用本次会话已提供的真实密钥
-- Model: step-3.7-flash
+- Base URL: <真实视觉模型 Base URL>
+- API Key: <视觉模型 API Key>
+- Model: <视觉模型 ID>
 
 Bridge 运行参数：
 - Host: 127.0.0.1
@@ -449,7 +449,7 @@ CC Switch 是否随登录启动仍由其自身设置控制；Windows 安装器�
 )
 ```
 
-把占位地址替换成自己的真实地址，例如 `https://tokenrhythm.studio/v1`。不要把 `UPSTREAM` 改成 `15720`，否则会形成自代理循环。修改 `UPSTREAM`、视觉配置或桥配置后，使用已安装的重启脚本重新加载用户级环境变量：
+把占位地址替换成自己的真实文本上游地址。不要把 `UPSTREAM` 改成 `15720`，否则会形成自代理循环。修改 `UPSTREAM`、视觉配置或桥配置后，使用已安装的重启脚本重新加载用户级环境变量：
 
 ```powershell
 powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass `
