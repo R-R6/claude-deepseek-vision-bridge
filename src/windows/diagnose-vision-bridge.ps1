@@ -124,6 +124,18 @@ try {
 } catch {
     $upstreamValid = $false
 }
+$visionBaseUrl = Get-ProcessSetting "VISION_BASE_URL"
+$visionBaseUrlValid = $false
+try {
+    $visionBaseUri = [Uri]$visionBaseUrl
+    $visionBaseUrlValid = $visionBaseUri.Scheme -in @("http", "https") -and
+        -not [string]::IsNullOrWhiteSpace($visionBaseUri.Host)
+} catch {
+    $visionBaseUrlValid = $false
+}
+$requiredConfigurationValid = $bridgePortValid -and $upstreamValid -and $visionBaseUrlValid -and
+    -not [string]::IsNullOrWhiteSpace((Get-ProcessSetting "VISION_API_KEY")) -and
+    -not [string]::IsNullOrWhiteSpace((Get-ProcessSetting "VISION_MODEL"))
 $rollbackStatePath = Join-Path $env:USERPROFILE ".claude\bridge\bridge-rollback-state.dat"
 $rollbackStateAvailable = Test-Path -LiteralPath $rollbackStatePath -PathType Leaf
 
@@ -154,8 +166,8 @@ Write-Output "Vision Bridge / CC Switch diagnostic (read-only)"
 } | Format-Table -AutoSize
 [pscustomobject]@{
     Check = "Required process configuration"
-    Status = if ($bridgePortValid -and $upstreamValid -and (Get-ProcessSetting "VISION_API_KEY")) { "PASS" } else { "FAIL" }
-    Detail = "UPSTREAM URL and required secret presence are checked; no secret or URL value is displayed"
+    Status = if ($requiredConfigurationValid) { "PASS" } else { "FAIL" }
+    Detail = "UPSTREAM and VISION_BASE_URL format plus VISION_API_KEY and VISION_MODEL presence are checked; values are hidden"
 } | Format-Table -AutoSize
 [pscustomobject]@{
     Check = "Restart rollback state"
@@ -173,6 +185,6 @@ if ($SkipCCSwitch) {
     Write-Output "If Bridge health fails, repair the bridge bundle/startup entry first. If Bridge passes but CC Switch fails, start CC Switch. If both pass but requests bypass the bridge, inspect the active CC Switch app profile and provider target in its UI; this script never edits SQLite."
 }
 
-if (-not $bridgeHealth -or (-not $SkipCCSwitch -and -not $ccSwitchListening) -or -not $bridgePortValid) {
+if (-not $bridgeHealth -or (-not $SkipCCSwitch -and -not $ccSwitchListening) -or -not $requiredConfigurationValid) {
     exit 1
 }

@@ -11,7 +11,9 @@ if (process.platform !== "win32") {
   process.exit(0);
 }
 
-const sourceDir = path.join(__dirname, "..", "src");
+const sourceRoot = path.join(__dirname, "..", "src");
+const coreDir = path.join(sourceRoot, "core");
+const windowsDir = path.join(sourceRoot, "windows");
 const powershell = "powershell.exe";
 
 function trace(message) {
@@ -175,14 +177,15 @@ function freePort() {
 function createBundle(homeDir) {
   const bridgeDir = path.join(homeDir, ".claude", "bridge");
   fs.mkdirSync(bridgeDir, { recursive: true });
-  for (const name of [
-    "vision-bridge.js",
-    "vision-client.js",
-    "start-vision-bridge.ps1",
-    "restart-vision-bridge.ps1",
-    "start-ccswitch-after-bridge.vbs",
-  ]) {
-    fs.copyFileSync(path.join(sourceDir, name), path.join(bridgeDir, name));
+  const sources = {
+    "vision-bridge.js": path.join(coreDir, "vision-bridge.js"),
+    "vision-client.js": path.join(coreDir, "vision-client.js"),
+    "start-vision-bridge.ps1": path.join(windowsDir, "start-vision-bridge.ps1"),
+    "restart-vision-bridge.ps1": path.join(windowsDir, "restart-vision-bridge.ps1"),
+    "start-ccswitch-after-bridge.vbs": path.join(windowsDir, "start-ccswitch-after-bridge.vbs"),
+  };
+  for (const [name, source] of Object.entries(sources)) {
+    fs.copyFileSync(source, path.join(bridgeDir, name));
   }
   return bridgeDir;
 }
@@ -206,6 +209,7 @@ function runLauncher(homeDir, port, extraEnv = {}) {
       BRIDGE_AUTH_TOKEN: "startup-test-token",
       UPSTREAM: "http://127.0.0.1:1/v1",
       VISION_BASE_URL: "http://127.0.0.1:1/v1",
+      VISION_MODEL: "startup-test-vision-model",
       VISION_API_KEY: "startup-test-key",
       BRIDGE_STARTUP_TIMEOUT_MS: "30000",
       ...extraEnv,
@@ -271,6 +275,7 @@ function runRestart(homeDir, port, upstream, extraEnv = {}, extraArgs = []) {
       BRIDGE_AUTH_TOKEN: "startup-test-token",
       UPSTREAM: upstream,
       VISION_BASE_URL: "http://127.0.0.1:1/v1",
+      VISION_MODEL: "startup-test-vision-model",
       VISION_API_KEY: "startup-test-key",
       BRIDGE_STARTUP_TIMEOUT_MS: "30000",
       ...extraEnv,
@@ -303,7 +308,7 @@ function runDiagnostic(homeDir, port, options = {}) {
     "-ExecutionPolicy",
     "Bypass",
     "-File",
-    path.join(sourceDir, "diagnose-vision-bridge.ps1"),
+    path.join(windowsDir, "diagnose-vision-bridge.ps1"),
     ...diagnosticArgs,
   ], {
     env: {
@@ -313,6 +318,8 @@ function runDiagnostic(homeDir, port, options = {}) {
       BRIDGE_PORT: String(port),
       BRIDGE_AUTH_TOKEN: "startup-test-token",
       UPSTREAM: "https://new.example/v1",
+      VISION_BASE_URL: "https://vision.example/v1",
+      VISION_MODEL: "startup-test-vision-model",
       VISION_API_KEY: "startup-test-key",
     },
     encoding: "utf8",
@@ -353,7 +360,7 @@ function runInstaller(homeDir, startupDir, extraArgs = []) {
     "-ExecutionPolicy",
     "Bypass",
     "-File",
-    path.join(sourceDir, "install-vision-bridge.ps1"),
+    path.join(windowsDir, "install-vision-bridge.ps1"),
     "-InstallUserProfile",
     homeDir,
     "-StartupDirectory",
@@ -430,7 +437,7 @@ function runRestore(homeDir, keyPath) {
     "-ExecutionPolicy",
     "Bypass",
     "-File",
-    path.join(sourceDir, "restore-ccswitch-startup.ps1"),
+    path.join(windowsDir, "restore-ccswitch-startup.ps1"),
     "-InstallUserProfile",
     homeDir,
     "-CCSwitchRunKeyPath",
@@ -809,6 +816,12 @@ async function main() {
     fs.rmSync(noCCSwitchRoot, { recursive: true, force: true });
 
     createBundle(normal.root);
+    const missingVisionBaseUrl = await runLauncher(normal.root, normal.port, { VISION_BASE_URL: "" });
+    assert.notEqual(missingVisionBaseUrl.status, 0);
+    assert.match(`${missingVisionBaseUrl.stdout}\n${missingVisionBaseUrl.stderr}`, /VISION_BASE_URL is not configured/);
+    const missingVisionModel = await runLauncher(normal.root, normal.port, { VISION_MODEL: "" });
+    assert.notEqual(missingVisionModel.status, 0);
+    assert.match(`${missingVisionModel.stdout}\n${missingVisionModel.stderr}`, /VISION_MODEL is not configured/);
     const normalResult = await runLauncher(normal.root, normal.port);
     assert.equal(normalResult.status, 0, `${normalResult.stdout}\n${normalResult.stderr}`);
     assert.match(normalResult.stdout, /passed health check/);

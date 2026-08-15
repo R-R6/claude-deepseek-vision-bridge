@@ -11,6 +11,10 @@ param(
 $ErrorActionPreference = "Stop"
 
 $sourceDir = $PSScriptRoot
+$sourceRoot = Split-Path -Parent $sourceDir
+$coreDir = Join-Path $sourceRoot "core"
+$routingDir = Join-Path $sourceRoot "routing"
+$templateDir = Join-Path $sourceRoot "templates"
 $bridgeDir = Join-Path $InstallUserProfile ".claude\bridge"
 $skillDir = Join-Path $InstallUserProfile ".claude\skills\vision"
 $startupDir = $StartupDirectory
@@ -22,12 +26,12 @@ $backupRoot = Join-Path $bridgeDir "backups\install-$installId"
 
 $sourceItems = @(
     [pscustomobject]@{
-        Source = Join-Path $sourceDir "vision-bridge.js"
+        Source = Join-Path $coreDir "vision-bridge.js"
         Destination = Join-Path $bridgeDir "vision-bridge.js"
         Label = "bridge"
     }
     [pscustomobject]@{
-        Source = Join-Path $sourceDir "vision-client.js"
+        Source = Join-Path $coreDir "vision-client.js"
         Destination = Join-Path $bridgeDir "vision-client.js"
         Label = "bridge"
     }
@@ -62,22 +66,22 @@ $sourceItems = @(
         Label = "bridge"
     }
     [pscustomobject]@{
-        Source = Join-Path $sourceDir "cc-switch-sqlite.js"
+        Source = Join-Path $routingDir "cc-switch-sqlite.js"
         Destination = Join-Path $bridgeDir "cc-switch-sqlite.js"
         Label = "bridge"
     }
     [pscustomobject]@{
-        Source = Join-Path $sourceDir "vision.js"
+        Source = Join-Path $coreDir "vision.js"
         Destination = Join-Path $skillDir "vision.js"
         Label = "skill"
     }
     [pscustomobject]@{
-        Source = Join-Path $sourceDir "vision-client.js"
+        Source = Join-Path $coreDir "vision-client.js"
         Destination = Join-Path $skillDir "vision-client.js"
         Label = "skill"
     }
     [pscustomobject]@{
-        Source = Join-Path $sourceDir "SKILL.md.template"
+        Source = Join-Path $templateDir "SKILL.md.template"
         Destination = Join-Path $skillDir "SKILL.md"
         Label = "skill"
     }

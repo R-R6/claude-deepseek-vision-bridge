@@ -65,9 +65,9 @@ function messageText(message) {
 }
 
 function describeImage(imageUrl, options = {}) {
-  const baseUrl = options.baseUrl || process.env.VISION_BASE_URL || "https://api.stepfun.com/v1";
-  const apiKey = options.apiKey || process.env.VISION_API_KEY || "";
-  const model = options.model || process.env.VISION_MODEL || "step-3.7-flash";
+  const baseUrl = options.baseUrl !== undefined ? options.baseUrl : process.env.VISION_BASE_URL;
+  const apiKey = options.apiKey !== undefined ? options.apiKey : process.env.VISION_API_KEY;
+  const model = options.model !== undefined ? options.model : process.env.VISION_MODEL;
   const prompt = options.prompt || "请详细描述这张图片的内容。";
   const timeoutMs = positiveInteger(
     options.timeoutMs ?? process.env.VISION_TIMEOUT_MS,
@@ -83,7 +83,9 @@ function describeImage(imageUrl, options = {}) {
     1024,
     10 * 1024 * 1024,
   );
-  if (!apiKey) return Promise.reject(new Error("VISION_API_KEY is not configured"));
+  if (!String(baseUrl || "").trim()) return Promise.reject(new Error("VISION_BASE_URL is required"));
+  if (!String(model || "").trim()) return Promise.reject(new Error("VISION_MODEL is required"));
+  if (!String(apiKey || "").trim()) return Promise.reject(new Error("VISION_API_KEY is required"));
 
   const url = chatCompletionsUrl(baseUrl);
   const transport = url.protocol === "https:" ? https : http;

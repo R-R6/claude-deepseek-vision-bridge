@@ -151,7 +151,7 @@ async function main() {
   const databasePath = path.join(ccSwitchDirectory, "cc-switch.db");
   const settingsPath = path.join(ccSwitchDirectory, "settings.json");
   const fakeSqlitePath = path.join(root, "sqlite3.ps1");
-  const routeScript = path.join(__dirname, "..", "src", "configure-ccswitch-route.ps1");
+  const routeScript = path.join(__dirname, "..", "src", "windows", "configure-ccswitch-route.ps1");
   const health = http.createServer((request, response) => {
     if (request.url === "/health") {
       response.writeHead(200, { "content-type": "application/json" });

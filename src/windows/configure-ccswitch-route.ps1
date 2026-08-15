@@ -319,6 +319,9 @@ try {
     $script:nodeExecutable = Get-NodeExecutable
     $script:nodeSqliteHelper = Join-Path $PSScriptRoot "cc-switch-sqlite.js"
     if (-not (Test-Path -LiteralPath $script:nodeSqliteHelper -PathType Leaf)) {
+        $script:nodeSqliteHelper = Join-Path (Split-Path -Parent $PSScriptRoot) "routing\cc-switch-sqlite.js"
+    }
+    if (-not (Test-Path -LiteralPath $script:nodeSqliteHelper -PathType Leaf)) {
         throw "sqlite3.exe was not found and the Node SQLite helper is unavailable."
     }
     $null = @(& $script:nodeExecutable -e "require('node:sqlite')" 2>&1)

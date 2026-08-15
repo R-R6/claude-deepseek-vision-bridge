@@ -11,7 +11,10 @@ if (process.platform !== "darwin") {
   process.exit(0);
 }
 
-const sourceDir = path.join(__dirname, "..", "src");
+const sourceRoot = path.join(__dirname, "..", "src");
+const coreDir = path.join(sourceRoot, "core");
+const routingDir = path.join(sourceRoot, "routing");
+const macosDir = path.join(sourceRoot, "macos");
 const nodePath = process.execPath;
 const ccSwitchProcessRunning = process.platform === "darwin"
   && run("/usr/bin/pgrep", ["-x", "cc-switch"]).status === 0;
@@ -318,16 +321,106 @@ async function main() {
       "start-ccswitch-after-bridge.sh",
       "vision.sh",
     ]) {
-      assert.equal(run("sh", ["-n", path.join(sourceDir, script)]).status, 0, script);
+      assert.equal(run("sh", ["-n", path.join(macosDir, script)]).status, 0, script);
     }
+
+    const sourceVisionResult = await runAsync("sh", [
+      path.join(macosDir, "vision.sh"),
+      "--url", "https://example.com/source-layout.png", "verify source layout",
+    ], {
+      env: {
+        ...process.env,
+        BRIDGE_ENV_FILE: envFile,
+        BRIDGE_NODE: nodePath,
+      },
+    });
+    assert.equal(sourceVisionResult.status, 0, `${sourceVisionResult.stdout}\n${sourceVisionResult.stderr}`);
+    assert.match(sourceVisionResult.stdout, /macOS Vision Skill response/);
 
     const missingConfigHome = path.join(root, "Missing Config Home");
     fs.mkdirSync(missingConfigHome, { recursive: true });
     const missingConfigResult = run("sh", [
-      path.join(sourceDir, "install-vision-bridge.sh"),
+      path.join(macosDir, "install-vision-bridge.sh"),
     ], { env: { ...process.env, HOME: missingConfigHome } });
     assert.notEqual(missingConfigResult.status, 0);
     assert.match(`${missingConfigResult.stdout}\n${missingConfigResult.stderr}`, /--env-file is required/);
+
+    const incompleteEnvFile = path.join(root, "incomplete-bridge.env");
+    fs.writeFileSync(incompleteEnvFile, [
+      "UPSTREAM=https://text.example/v1",
+      "VISION_BASE_URL=https://vision.example/v1",
+      "VISION_API_KEY=test-secret",
+    ].join("\n") + "\n", { mode: 0o600 });
+    const incompleteInstallHome = path.join(root, "Incomplete Config Home");
+    const incompleteInstallResult = run("sh", [
+      path.join(macosDir, "install-vision-bridge.sh"),
+      "--env-file", incompleteEnvFile,
+      "--skip-launchctl",
+    ], { env: { ...process.env, HOME: incompleteInstallHome } });
+    assert.notEqual(incompleteInstallResult.status, 0);
+    assert.match(`${incompleteInstallResult.stdout}\n${incompleteInstallResult.stderr}`, /VISION_MODEL is not configured/);
+    assert.equal(fs.existsSync(path.join(incompleteInstallHome, ".claude", "bridge")), false);
+
+    const whitespaceEnvFile = path.join(root, "whitespace-bridge.env");
+    fs.writeFileSync(whitespaceEnvFile, [
+      "UPSTREAM=https://text.example/v1",
+      "VISION_BASE_URL=https://vision.example/v1",
+      "VISION_API_KEY=test-secret",
+      "VISION_MODEL=   ",
+    ].join("\n") + "\n", { mode: 0o600 });
+    const whitespaceInstallHome = path.join(root, "Whitespace Config Home");
+    const whitespaceInstallResult = run("sh", [
+      path.join(macosDir, "install-vision-bridge.sh"),
+      "--env-file", whitespaceEnvFile,
+      "--skip-launchctl",
+    ], { env: { ...process.env, HOME: whitespaceInstallHome } });
+    assert.notEqual(whitespaceInstallResult.status, 0);
+    assert.match(`${whitespaceInstallResult.stdout}\n${whitespaceInstallResult.stderr}`, /VISION_MODEL is not configured/);
+    assert.equal(fs.existsSync(path.join(whitespaceInstallHome, ".claude", "bridge")), false);
+
+    const insecureEnvFile = path.join(root, "insecure-bridge.env");
+    fs.writeFileSync(insecureEnvFile, [
+      "UPSTREAM=http://text.example/v1",
+      "VISION_BASE_URL=https://vision.example/v1",
+      "VISION_API_KEY=test-secret",
+      "VISION_MODEL=test-vision-model",
+    ].join("\n") + "\n", { mode: 0o600 });
+    const insecureInstallHome = path.join(root, "Insecure Config Home");
+    const insecureInstallResult = run("sh", [
+      path.join(macosDir, "install-vision-bridge.sh"),
+      "--env-file", insecureEnvFile,
+      "--skip-launchctl",
+    ], { env: { ...process.env, HOME: insecureInstallHome } });
+    assert.notEqual(insecureInstallResult.status, 0);
+    assert.match(`${insecureInstallResult.stdout}\n${insecureInstallResult.stderr}`, /UPSTREAM must use https/);
+    assert.equal(fs.existsSync(path.join(insecureInstallHome, ".claude", "bridge")), false);
+
+    for (const [missingName, extraEnvironment] of [
+      ["VISION_BASE_URL", { VISION_BASE_URL: "" }],
+      ["VISION_MODEL", { VISION_MODEL: "" }],
+    ]) {
+      const missingRequiredResult = run("sh", [
+        path.join(macosDir, "start-vision-bridge.sh"),
+      ], {
+        env: {
+          ...process.env,
+          BRIDGE_DIR: coreDir,
+          BRIDGE_SCRIPT: path.join(coreDir, "vision-bridge.js"),
+          BRIDGE_ENV_FILE: path.join(root, "missing-environment-file"),
+          BRIDGE_NODE: nodePath,
+          UPSTREAM: "https://text.example/v1",
+          VISION_API_KEY: "test-secret",
+          VISION_BASE_URL: "https://vision.example/v1",
+          VISION_MODEL: "test-vision-model",
+          ...extraEnvironment,
+        },
+      });
+      assert.notEqual(missingRequiredResult.status, 0);
+      assert.match(
+        `${missingRequiredResult.stdout}\n${missingRequiredResult.stderr}`,
+        new RegExp(`${missingName} is not configured`),
+      );
+    }
 
     const fakeNodeDirectory = path.join(root, "fake-node-bin");
     const legacyNodePath = path.join(fakeNodeDirectory, "node");
@@ -340,7 +433,7 @@ fi
 printf '%s\n' "17"
 `);
     const legacyNodeResult = run("sh", [
-      path.join(sourceDir, "install-vision-bridge.sh"),
+      path.join(macosDir, "install-vision-bridge.sh"),
       "--skip-launchctl",
     ], {
       env: {
@@ -364,7 +457,7 @@ printf '%s\n' "17"
     fs.writeFileSync(rollbackPlist, originalRollbackPlist, "utf8");
     writeFakeLaunchctl(path.join(fakeLaunchctlDirectory, "launchctl"));
     const rollbackResult = run("sh", [
-      path.join(sourceDir, "install-vision-bridge.sh"),
+      path.join(macosDir, "install-vision-bridge.sh"),
       "--env-file", envFile,
       "--bridge-port", String(bridgePort),
     ], {
@@ -395,7 +488,7 @@ printf '%s\n' "17"
     fs.writeFileSync(interruptPlist, originalInterruptPlist, "utf8");
     writeInterruptingLaunchctl(path.join(interruptBin, "launchctl"));
     const interruptResult = run("sh", [
-      path.join(sourceDir, "install-vision-bridge.sh"),
+      path.join(macosDir, "install-vision-bridge.sh"),
       "--env-file", envFile,
       "--bridge-port", String(bridgePort),
     ], {
@@ -414,7 +507,7 @@ printf '%s\n' "17"
     assert.match(interruptCalls, /^bootout /m);
 
     const installer = run("sh", [
-      path.join(sourceDir, "install-vision-bridge.sh"),
+      path.join(macosDir, "install-vision-bridge.sh"),
       "--env-file", envFile,
       "--bridge-port", String(bridgePort),
       "--ccswitch-directory", routeDir,
@@ -522,7 +615,7 @@ printf '%s\n' "17"
       fs.mkdirSync(backupDirectory, { recursive: true, mode: 0o755 });
       fs.chmodSync(backupDirectory, 0o755);
       const routeResult = await runAsync(nodePath, [
-        path.join(sourceDir, "configure-ccswitch-route.js"),
+        path.join(routingDir, "configure-ccswitch-route.js"),
         "--database", databasePath,
         "--settings", settingsPath,
         "--backup-directory", backupDirectory,
@@ -539,7 +632,7 @@ printf '%s\n' "17"
       assert.doesNotMatch(`${routeResult.stdout}\n${routeResult.stderr}`, /mac-route-test-secret/);
 
       const healthOnlyResult = await runAsync(nodePath, [
-        path.join(sourceDir, "configure-ccswitch-route.js"),
+        path.join(routingDir, "configure-ccswitch-route.js"),
         "--bridge-port", String(healthPort),
         "--bridge-env-file", path.join(root, "missing-bridge.env"),
         "--health-only",
@@ -548,7 +641,7 @@ printf '%s\n' "17"
       assert.match(healthOnlyResult.stdout, /managed version 0\.2\.1/);
 
       const authenticatedRouteResult = await runAsync(nodePath, [
-        path.join(sourceDir, "configure-ccswitch-route.js"),
+        path.join(routingDir, "configure-ccswitch-route.js"),
         "--database", databasePath,
         "--settings", settingsPath,
         "--backup-directory", authenticatedBackupDirectory,
@@ -562,11 +655,11 @@ printf '%s\n' "17"
       assert.equal(readProviderValue(DatabaseSync, databasePath, "$.env.ANTHROPIC_AUTH_TOKEN"), "mac-route-test-secret");
       assert.doesNotMatch(`${authenticatedRouteResult.stdout}\n${authenticatedRouteResult.stderr}`, /mac-route-health-token|mac-route-test-secret/);
 
-      const wrapperEnvironment = { ...routeEnvironment, BRIDGE_DIR: sourceDir };
+      const wrapperEnvironment = { ...routeEnvironment, BRIDGE_DIR: routingDir };
       const heldDatabase = new DatabaseSync(databasePath);
       try {
         const noOpWhileRunningResult = await runAsync(nodePath, [
-          path.join(sourceDir, "configure-ccswitch-route.js"),
+          path.join(routingDir, "configure-ccswitch-route.js"),
           "--database", databasePath,
           "--settings", settingsPath,
           "--app-type", "claude-desktop",
@@ -588,7 +681,7 @@ printf '%s\n' "17"
           "UPDATE providers SET settings_config = json_set(settings_config, '$.env.ANTHROPIC_BASE_URL', ?)",
         ).run("https://text.example/v1");
         const refusedWhileRunningResult = await runAsync("sh", [
-          path.join(sourceDir, "configure-ccswitch-route.sh"),
+          path.join(macosDir, "configure-ccswitch-route.sh"),
           "--ccswitch-directory", routeDir,
           "--database", databasePath,
           "--settings", settingsPath,
@@ -611,7 +704,7 @@ printf '%s\n' "17"
       const sidecarHandle = fs.openSync(sidecarPath, "r");
       try {
         const sidecarLockResult = await runAsync(nodePath, [
-          path.join(sourceDir, "configure-ccswitch-route.js"),
+          path.join(routingDir, "configure-ccswitch-route.js"),
           "--database", databasePath,
           "--settings", settingsPath,
           "--app-type", "claude-desktop",
@@ -630,7 +723,7 @@ printf '%s\n' "17"
       }
 
       const restoreRouteResult = await runAsync(nodePath, [
-        path.join(sourceDir, "configure-ccswitch-route.js"),
+        path.join(routingDir, "configure-ccswitch-route.js"),
         "--database", databasePath,
         "--settings", settingsPath,
         "--backup-directory", restoreBackupDirectory,
@@ -641,7 +734,7 @@ printf '%s\n' "17"
       assert.equal(restoreRouteResult.status, 0, `${restoreRouteResult.stdout}\n${restoreRouteResult.stderr}`);
 
       const compareBackupResult = await runAsync(nodePath, [
-        path.join(sourceDir, "configure-ccswitch-route.js"),
+        path.join(routingDir, "configure-ccswitch-route.js"),
         "--database", databasePath,
         "--settings", settingsPath,
         "--app-type", "claude-desktop",
@@ -651,7 +744,7 @@ printf '%s\n' "17"
       assert.match(compareBackupResult.stderr, /protected backup/);
 
       const forcedNoOpResult = await runAsync("sh", [
-        path.join(sourceDir, "configure-ccswitch-route.sh"),
+        path.join(macosDir, "configure-ccswitch-route.sh"),
         "--ccswitch-directory", routeDir,
         "--ccswitch-app", path.join(root, "missing-cc-switch.app"),
         "--app-type", "claude-desktop",
@@ -663,7 +756,7 @@ printf '%s\n' "17"
       assert.match(forcedNoOpResult.stdout, /already targets/);
 
       const aliasStatusResult = await runAsync("sh", [
-        path.join(sourceDir, "configure-ccswitch-route.sh"),
+        path.join(macosDir, "configure-ccswitch-route.sh"),
         "--cc-switch-directory", routeDir,
         "--app-type", "claude-desktop",
         "--status",
@@ -672,7 +765,7 @@ printf '%s\n' "17"
       assert.match(aliasStatusResult.stdout, /current route:/);
 
       const bypassResult = run(nodePath, [
-        path.join(sourceDir, "configure-ccswitch-route.js"),
+        path.join(routingDir, "configure-ccswitch-route.js"),
         "--skip-health-check",
       ]);
       assert.notEqual(bypassResult.status, 0);
@@ -691,7 +784,7 @@ printf '%s\n' "17"
         malformedDatabase.close();
       }
       const malformedResult = await runAsync(nodePath, [
-        path.join(sourceDir, "configure-ccswitch-route.js"),
+        path.join(routingDir, "configure-ccswitch-route.js"),
         "--database", malformedDatabasePath,
         "--settings", settingsPath,
         "--backup-directory", malformedBackupDirectory,
@@ -704,7 +797,7 @@ printf '%s\n' "17"
       assert.equal(fs.existsSync(malformedBackupDirectory), false);
 
       const statusResult = run(nodePath, [
-        path.join(sourceDir, "configure-ccswitch-route.js"),
+        path.join(routingDir, "configure-ccswitch-route.js"),
         "--database", databasePath,
         "--settings", settingsPath,
         "--app-type", "claude-desktop",
@@ -725,7 +818,7 @@ printf '%s\n' "17"
         ambiguousDatabase.close();
       }
       const ambiguousAutoResult = run(nodePath, [
-        path.join(sourceDir, "configure-ccswitch-route.js"),
+        path.join(routingDir, "configure-ccswitch-route.js"),
         "--database", databasePath,
         "--settings", settingsPath,
         "--app-type", "auto",
@@ -739,7 +832,7 @@ printf '%s\n' "17"
 
       fs.writeFileSync(settingsPath, JSON.stringify({ currentProviderClaudeDesktop: "other-provider" }), "utf8");
       const mismatchedSettingsResult = run(nodePath, [
-        path.join(sourceDir, "configure-ccswitch-route.js"),
+        path.join(routingDir, "configure-ccswitch-route.js"),
         "--database", databasePath,
         "--settings", settingsPath,
         "--app-type", "claude-desktop",

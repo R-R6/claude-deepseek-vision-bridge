@@ -220,12 +220,22 @@ try {
 
     $upstream = Get-ProcessSetting "UPSTREAM"
     if ([string]::IsNullOrWhiteSpace($upstream)) {
-        throw "UPSTREAM is not configured in this process. Set it to the original DeepSeek provider base URL, then log out and in or reopen the launcher session."
+        throw "UPSTREAM is not configured in this process. Set it to the real text-model upstream base URL, then log out and in or reopen the launcher session."
     }
 
     $visionKey = Get-ProcessSetting "VISION_API_KEY"
     if ([string]::IsNullOrWhiteSpace($visionKey)) {
         throw "VISION_API_KEY is not configured in this process."
+    }
+
+    $visionBaseUrl = Get-ProcessSetting "VISION_BASE_URL"
+    if ([string]::IsNullOrWhiteSpace($visionBaseUrl)) {
+        throw "VISION_BASE_URL is not configured in this process."
+    }
+
+    $visionModel = Get-ProcessSetting "VISION_MODEL"
+    if ([string]::IsNullOrWhiteSpace($visionModel)) {
+        throw "VISION_MODEL is not configured in this process."
     }
 
     $hostName = Get-ProcessSetting "BRIDGE_HOST"

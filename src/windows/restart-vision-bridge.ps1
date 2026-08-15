@@ -137,6 +137,24 @@ function Get-BridgeSettings {
         throw "VISION_API_KEY is not configured in the selected environment scope."
     }
 
+    $visionBaseUrl = Get-ScopedEnvironmentValue "VISION_BASE_URL"
+    if ([string]::IsNullOrWhiteSpace($visionBaseUrl)) {
+        throw "VISION_BASE_URL is not configured in the selected environment scope."
+    }
+    try {
+        $visionUri = [Uri]$visionBaseUrl
+    } catch {
+        throw "VISION_BASE_URL must be a valid absolute URL."
+    }
+    if ($visionUri.Scheme -notin @("http", "https") -or [string]::IsNullOrWhiteSpace($visionUri.Host)) {
+        throw "VISION_BASE_URL must use an absolute http or https URL."
+    }
+
+    $visionModel = Get-ScopedEnvironmentValue "VISION_MODEL"
+    if ([string]::IsNullOrWhiteSpace($visionModel)) {
+        throw "VISION_MODEL is not configured in the selected environment scope."
+    }
+
     $startupTimeoutText = Get-ScopedEnvironmentValue "BRIDGE_STARTUP_TIMEOUT_MS"
     if ([string]::IsNullOrWhiteSpace($startupTimeoutText)) {
         $startupTimeoutText = "30000"
@@ -396,7 +414,7 @@ function Get-RollbackSnapshot {
         if ($null -eq $snapshot) {
             throw "protected rollback state did not contain an object"
         }
-        foreach ($name in @("UPSTREAM", "VISION_API_KEY", "BRIDGE_HOST", "BRIDGE_PORT")) {
+        foreach ($name in @("UPSTREAM", "VISION_API_KEY", "VISION_BASE_URL", "VISION_MODEL", "BRIDGE_HOST", "BRIDGE_PORT")) {
             $property = $snapshot.PSObject.Properties[$name]
             if ($null -eq $property -or [string]::IsNullOrWhiteSpace([string]$property.Value)) {
                 throw "protected rollback state is missing required configuration"

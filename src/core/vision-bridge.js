@@ -96,14 +96,20 @@ const UPSTREAM = process.env.UPSTREAM || "";
 const BRIDGE_AUTH_TOKEN = process.env.BRIDGE_AUTH_TOKEN || "";
 const VISION_PROMPT = process.env.VISION_PROMPT
   || "用简短中文准确描述图片内容；如有文字，优先完整抄录与问题最相关的文字。";
-const VISION_BASE_URL = process.env.VISION_BASE_URL || "https://api.stepfun.com/v1";
+const VISION_BASE_URL = process.env.VISION_BASE_URL || "";
+const VISION_MODEL = process.env.VISION_MODEL || "";
+const VISION_API_KEY = process.env.VISION_API_KEY || "";
 let UPSTREAM_URL;
 let VISION_URL;
 try {
+  if (!UPSTREAM.trim()) throw new Error("UPSTREAM is required");
+  if (!VISION_BASE_URL.trim()) throw new Error("VISION_BASE_URL is required");
+  if (!VISION_MODEL.trim()) throw new Error("VISION_MODEL is required");
+  if (!VISION_API_KEY.trim()) throw new Error("VISION_API_KEY is required");
   UPSTREAM_URL = validateServiceUrl(UPSTREAM, "UPSTREAM");
   VISION_URL = validateServiceUrl(VISION_BASE_URL, "VISION_BASE_URL");
 } catch (error) {
-  configurationError(UPSTREAM ? error.message : "UPSTREAM is required");
+  configurationError(error.message);
 }
 
 function log(...args) {

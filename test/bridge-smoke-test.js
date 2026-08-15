@@ -3,6 +3,8 @@ const assert = require("node:assert/strict");
 const http = require("node:http");
 const path = require("node:path");
 const { spawn, spawnSync } = require("node:child_process");
+const coreDir = path.join(__dirname, "..", "src", "core");
+const { describeImage } = require(path.join(coreDir, "vision-client.js"));
 
 function listen(server) {
   return new Promise((resolve) => server.listen(0, "127.0.0.1", () => resolve(server.address().port)));
@@ -104,7 +106,7 @@ function imagePayload() {
 }
 
 function assertConfigRejected(env, expectedMessage) {
-  const result = spawnSync(process.execPath, [path.join(__dirname, "..", "src", "vision-bridge.js")], {
+  const result = spawnSync(process.execPath, [path.join(coreDir, "vision-bridge.js")], {
     env: { ...process.env, ...env },
     encoding: "utf8",
     timeout: 5000,
@@ -114,6 +116,22 @@ function assertConfigRejected(env, expectedMessage) {
 }
 
 async function main() {
+  await assert.rejects(
+    describeImage("data:image/png;base64,AAAA", {
+      baseUrl: "",
+      model: "test-vision-model",
+      apiKey: "test-key",
+    }),
+    /VISION_BASE_URL is required/,
+  );
+  await assert.rejects(
+    describeImage("data:image/png;base64,AAAA", {
+      baseUrl: "https://vision.example/v1",
+      model: "",
+      apiKey: "test-key",
+    }),
+    /VISION_MODEL is required/,
+  );
   const seen = [];
   let holdVision = false;
   let visionGate = Promise.resolve();
@@ -164,13 +182,14 @@ async function main() {
       probe.close(() => resolve(port));
     });
   });
-  const bridge = spawn(process.execPath, [path.join(__dirname, "..", "src", "vision-bridge.js")], {
+  const bridge = spawn(process.execPath, [path.join(coreDir, "vision-bridge.js")], {
     env: {
       ...process.env,
       BRIDGE_PORT: String(bridgePort),
       BRIDGE_AUTH_TOKEN: "test-bridge-token",
       UPSTREAM: `http://127.0.0.1:${upstreamPort}/v1`,
       VISION_BASE_URL: `http://127.0.0.1:${visionPort}/v1`,
+      VISION_MODEL: "test-vision-model",
       VISION_API_KEY: "test-key",
       VISION_TIMEOUT_MS: "2000",
       UPSTREAM_TIMEOUT_MS: "2000",
@@ -267,19 +286,38 @@ async function main() {
     assertConfigRejected({
       BRIDGE_PORT: "19002",
       UPSTREAM: "http://example.com/v1",
+      VISION_BASE_URL: "https://vision.example/v1",
+      VISION_MODEL: "test-vision-model",
       VISION_API_KEY: "test-key",
     }, /UPSTREAM must use https/);
     assertConfigRejected({
       BRIDGE_PORT: "19003",
       UPSTREAM: "http://127.0.0.1:9/v1",
       VISION_BASE_URL: "http://example.com/v1",
+      VISION_MODEL: "test-vision-model",
       VISION_API_KEY: "test-key",
     }, /VISION_BASE_URL must use https/);
     assertConfigRejected({
       BRIDGE_PORT: "19004",
       UPSTREAM: "http://127.evil.example/v1",
+      VISION_BASE_URL: "https://vision.example/v1",
+      VISION_MODEL: "test-vision-model",
       VISION_API_KEY: "test-key",
     }, /UPSTREAM must use https/);
+    assertConfigRejected({
+      BRIDGE_PORT: "19005",
+      UPSTREAM: "https://text.example/v1",
+      VISION_BASE_URL: "",
+      VISION_MODEL: "test-vision-model",
+      VISION_API_KEY: "test-key",
+    }, /VISION_BASE_URL is required/);
+    assertConfigRejected({
+      BRIDGE_PORT: "19006",
+      UPSTREAM: "https://text.example/v1",
+      VISION_BASE_URL: "https://vision.example/v1",
+      VISION_MODEL: "",
+      VISION_API_KEY: "test-key",
+    }, /VISION_MODEL is required/);
 
     assert.equal(seen.length, 21);
     assert.equal(seen[0].url, "/v1/messages?beta=1");

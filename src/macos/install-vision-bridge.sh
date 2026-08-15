@@ -8,6 +8,10 @@ if [ "$(uname -s)" != "Darwin" ]; then
 fi
 
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+SOURCE_ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)
+CORE_DIR=${SOURCE_ROOT}/core
+ROUTING_DIR=${SOURCE_ROOT}/routing
+TEMPLATE_DIR=${SOURCE_ROOT}/templates
 INSTALL_HOME=${HOME}
 LAUNCH_AGENTS_DIR=${HOME}/Library/LaunchAgents
 BRIDGE_HOST=${BRIDGE_HOST:-127.0.0.1}
@@ -107,9 +111,44 @@ require_node_18() {
     [ "$node_major" -ge 18 ] || fail "Node.js 18+ is required; found Node.js $node_major."
 }
 
+validate_environment_file() (
+    environment_file=$1
+    unset UPSTREAM VISION_API_KEY VISION_BASE_URL VISION_MODEL
+    set -a
+    # shellcheck disable=SC1090
+    . "$environment_file"
+    set +a
+    validation_error=""
+    if ! validation_error=$("$NODE_PATH" - "$CORE_DIR/vision-client.js" 2>&1 <<'NODE'
+const { validateServiceUrl } = require(process.argv[2]);
+for (const name of ["UPSTREAM", "VISION_API_KEY", "VISION_BASE_URL", "VISION_MODEL"]) {
+  if (typeof process.env[name] !== "string" || !process.env[name].trim()) {
+    process.stderr.write(`${name} is not configured`);
+    process.exitCode = 1;
+    break;
+  }
+}
+if (!process.exitCode) {
+  for (const name of ["UPSTREAM", "VISION_BASE_URL"]) {
+    try {
+      validateServiceUrl(process.env[name], name);
+    } catch (error) {
+      process.stderr.write(error.message);
+      process.exitCode = 1;
+      break;
+    }
+  }
+}
+NODE
+    ); then
+        [ -n "$validation_error" ] || validation_error="environment validation failed"
+        fail "$validation_error in $environment_file."
+    fi
+)
+
 require_node_18 "$NODE_PATH"
-[ -f "$SCRIPT_DIR/vision-bridge.js" ] || fail "source files were not found beside the installer: $SCRIPT_DIR"
-[ -f "$SCRIPT_DIR/bridge-health.js" ] || fail "source file was not found: $SCRIPT_DIR/bridge-health.js"
+[ -f "$CORE_DIR/vision-bridge.js" ] || fail "core source files were not found: $CORE_DIR"
+[ -f "$CORE_DIR/bridge-health.js" ] || fail "source file was not found: $CORE_DIR/bridge-health.js"
 
 case "$BRIDGE_PORT" in
     ''|*[!0-9]*) fail "--bridge-port must be an integer between 1 and 65535." ;;
@@ -147,6 +186,13 @@ if [ -f "$bridge_dir/bridge.env" ] && [ "$(stat -f '%Lp' "$bridge_dir/bridge.env
 fi
 if [ "$SKIP_LAUNCHCTL" -eq 0 ] && [ -z "$ENV_FILE_SOURCE" ] && [ ! -f "$bridge_dir/bridge.env" ]; then
     fail "--env-file is required before loading launchd when no existing bridge environment file is present."
+fi
+environment_file_to_validate=$ENV_FILE_SOURCE
+if [ -z "$environment_file_to_validate" ] && [ -f "$bridge_dir/bridge.env" ]; then
+    environment_file_to_validate=$bridge_dir/bridge.env
+fi
+if [ -n "$environment_file_to_validate" ]; then
+    validate_environment_file "$environment_file_to_validate"
 fi
 install_id=$(date +%Y%m%d-%H%M%S)-$$
 backup_root=${bridge_dir}/backups/install-${install_id}
@@ -356,22 +402,22 @@ if [ "$COORDINATE_CCSWITCH" -eq 1 ]; then
     stage_generated_file "${stage_root}/cc-switch-coordinator.plist" "$coordinator_plist_path" launchd 600
 fi
 
-stage_file "$SCRIPT_DIR/vision-bridge.js" "$bridge_dir/vision-bridge.js" bridge 755
-stage_file "$SCRIPT_DIR/vision-client.js" "$bridge_dir/vision-client.js" bridge 644
-stage_file "$SCRIPT_DIR/bridge-health.js" "$bridge_dir/bridge-health.js" bridge 755
+stage_file "$CORE_DIR/vision-bridge.js" "$bridge_dir/vision-bridge.js" bridge 755
+stage_file "$CORE_DIR/vision-client.js" "$bridge_dir/vision-client.js" bridge 644
+stage_file "$CORE_DIR/bridge-health.js" "$bridge_dir/bridge-health.js" bridge 755
 stage_file "$SCRIPT_DIR/start-vision-bridge.sh" "$bridge_dir/start-vision-bridge.sh" bridge 755
 stage_file "$SCRIPT_DIR/bridge-rollback-state.sh" "$bridge_dir/bridge-rollback-state.sh" bridge 755
 stage_file "$SCRIPT_DIR/restart-vision-bridge.sh" "$bridge_dir/restart-vision-bridge.sh" bridge 755
 stage_file "$SCRIPT_DIR/reinstall-vision-bridge.sh" "$bridge_dir/reinstall-vision-bridge.sh" bridge 755
 stage_file "$SCRIPT_DIR/diagnose-vision-bridge.sh" "$bridge_dir/diagnose-vision-bridge.sh" bridge 755
-stage_file "$SCRIPT_DIR/configure-ccswitch-route.js" "$bridge_dir/configure-ccswitch-route.js" bridge 755
+stage_file "$ROUTING_DIR/configure-ccswitch-route.js" "$bridge_dir/configure-ccswitch-route.js" bridge 755
 stage_file "$SCRIPT_DIR/configure-ccswitch-route.sh" "$bridge_dir/configure-ccswitch-route.sh" bridge 755
 stage_file "$SCRIPT_DIR/start-ccswitch-after-bridge.sh" "$bridge_dir/start-ccswitch-after-bridge.sh" bridge 755
-stage_file "$SCRIPT_DIR/vision.js" "$skill_dir/vision.js" skill 755
+stage_file "$CORE_DIR/vision.js" "$skill_dir/vision.js" skill 755
 stage_file "$SCRIPT_DIR/vision.sh" "$skill_dir/vision.sh" skill 755
-stage_file "$SCRIPT_DIR/vision-client.js" "$skill_dir/vision-client.js" skill 644
-stage_file "$SCRIPT_DIR/SKILL.md.template" "$skill_dir/SKILL.md" skill 644
-stage_file "$SCRIPT_DIR/../.env.example" "$bridge_dir/bridge.env.example" bridge 600
+stage_file "$CORE_DIR/vision-client.js" "$skill_dir/vision-client.js" skill 644
+stage_file "$TEMPLATE_DIR/SKILL.md.template" "$skill_dir/SKILL.md" skill 644
+stage_file "$SOURCE_ROOT/../.env.example" "$bridge_dir/bridge.env.example" bridge 600
 
 if [ -n "$ENV_FILE_SOURCE" ]; then
     stage_file "$ENV_FILE_SOURCE" "$bridge_dir/bridge.env" config 600

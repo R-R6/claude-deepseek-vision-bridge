@@ -4,6 +4,7 @@ set -eu
 
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 vision_script=${SCRIPT_DIR}/vision.js
+[ -f "$vision_script" ] || vision_script=${SCRIPT_DIR}/../core/vision.js
 BRIDGE_ENV_FILE=${BRIDGE_ENV_FILE:-"${HOME}/.claude/bridge/bridge.env"}
 
 fail() {
@@ -32,5 +33,7 @@ case "$node_major" in
 esac
 [ "$node_major" -ge 18 ] || fail "Node.js 18+ is required; found Node.js $node_major."
 [ -n "${VISION_API_KEY:-}" ] || fail "VISION_API_KEY is not configured. Put it in $BRIDGE_ENV_FILE."
+[ -n "${VISION_BASE_URL:-}" ] || fail "VISION_BASE_URL is not configured. Put it in $BRIDGE_ENV_FILE."
+[ -n "${VISION_MODEL:-}" ] || fail "VISION_MODEL is not configured. Put it in $BRIDGE_ENV_FILE."
 
 exec "$BRIDGE_NODE" "$vision_script" "$@"

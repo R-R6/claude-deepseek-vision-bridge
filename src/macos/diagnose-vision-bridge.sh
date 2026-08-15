@@ -109,8 +109,20 @@ if [ "$BRIDGE_PORT_VALID" = yes ] && [ -n "${UPSTREAM:-}" ] && [ -n "$BRIDGE_NOD
     upstream_valid="yes"
 fi
 
+vision_base_url_valid="no"
+if [ -n "${VISION_BASE_URL:-}" ] && [ -n "$BRIDGE_NODE" ] && VISION_BASE_URL="$VISION_BASE_URL" "$BRIDGE_NODE" -e '
+  const value = process.env.VISION_BASE_URL || "";
+  try {
+    const url = new URL(value);
+    if (!["http:", "https:"].includes(url.protocol) || !url.hostname) process.exit(1);
+  } catch { process.exit(1); }
+' >/dev/null 2>&1; then
+    vision_base_url_valid="yes"
+fi
+
 required_config="FAIL"
-if [ "$env_file_insecure" -eq 0 ] && [ "$upstream_valid" = "yes" ] && [ -n "${VISION_API_KEY:-}" ]; then
+if [ "$env_file_insecure" -eq 0 ] && [ "$upstream_valid" = "yes" ] &&
+    [ "$vision_base_url_valid" = "yes" ] && [ -n "${VISION_API_KEY:-}" ] && [ -n "${VISION_MODEL:-}" ]; then
     required_config="PASS"
 fi
 
@@ -120,7 +132,7 @@ printf '%s\n' "--------------------------------  ----- -------------------------
 print_check "Bridge health" "$bridge_health" "$(health_url); managed version 0.2.1"
 print_check "Bridge port ownership" "$( [ "$bridge_port_listener" = yes ] && printf PASS || printf WARN )" "listening=$bridge_port_listener; port=$BRIDGE_PORT"
 print_check "launchd agent" "$launch_agent" "$BRIDGE_LABEL"
-required_detail="UPSTREAM and VISION_API_KEY presence checked; values hidden"
+required_detail="UPSTREAM and VISION_BASE_URL format plus VISION_API_KEY and VISION_MODEL presence checked; values hidden"
 [ "$env_file_insecure" -eq 0 ] || required_detail="bridge.env must be a non-symlink file with 600 permissions; values hidden"
 print_check "Required configuration" "$required_config" "$required_detail"
 

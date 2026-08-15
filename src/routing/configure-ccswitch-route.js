@@ -6,7 +6,10 @@ const https = require("node:https");
 const os = require("node:os");
 const path = require("node:path");
 const { spawnSync } = require("node:child_process");
-const { isLoopbackHostname } = require("./vision-client");
+const installedClient = path.join(__dirname, "vision-client.js");
+const { isLoopbackHostname } = require(fs.existsSync(installedClient)
+  ? installedClient
+  : path.join(__dirname, "..", "core", "vision-client.js"));
 
 const EXPECTED_BRIDGE_VERSION = "0.2.1";
 

@@ -39,6 +39,8 @@ esac
 [ -d "$CCSWITCH_APP_PATH" ] || fail "CC Switch app was not found: $CCSWITCH_APP_PATH"
 [ -n "${UPSTREAM:-}" ] || fail "UPSTREAM is not configured. Put it in $BRIDGE_ENV_FILE or the launchd environment."
 [ -n "${VISION_API_KEY:-}" ] || fail "VISION_API_KEY is not configured. Put it in $BRIDGE_ENV_FILE or the launchd environment."
+[ -n "${VISION_BASE_URL:-}" ] || fail "VISION_BASE_URL is not configured. Put it in $BRIDGE_ENV_FILE or the launchd environment."
+[ -n "${VISION_MODEL:-}" ] || fail "VISION_MODEL is not configured. Put it in $BRIDGE_ENV_FILE or the launchd environment."
 
 case "$BRIDGE_STARTUP_COORDINATOR_TIMEOUT_MS" in
     ''|*[!0-9]*) fail "BRIDGE_STARTUP_COORDINATOR_TIMEOUT_MS must be an integer between 1000 and 300000." ;;

@@ -33,6 +33,8 @@ load_environment() {
 validate_environment() {
     [ -n "${UPSTREAM:-}" ] || fail "UPSTREAM is not configured. Put it in $BRIDGE_ENV_FILE."
     [ -n "${VISION_API_KEY:-}" ] || fail "VISION_API_KEY is not configured. Put it in $BRIDGE_ENV_FILE."
+    [ -n "${VISION_BASE_URL:-}" ] || fail "VISION_BASE_URL is not configured. Put it in $BRIDGE_ENV_FILE."
+    [ -n "${VISION_MODEL:-}" ] || fail "VISION_MODEL is not configured. Put it in $BRIDGE_ENV_FILE."
     [ -f "$BRIDGE_PLIST" ] || fail "launch agent plist was not found: $BRIDGE_PLIST"
     [ -f "$BRIDGE_DIR/bridge-health.js" ] || fail "bridge health helper was not found: $BRIDGE_DIR/bridge-health.js"
     [ -f "$BRIDGE_DIR/start-vision-bridge.sh" ] || fail "bridge launcher was not found: $BRIDGE_DIR/start-vision-bridge.sh"

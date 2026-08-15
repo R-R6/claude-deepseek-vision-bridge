@@ -50,6 +50,8 @@ esac
 [ "$node_major" -ge 18 ] || fail "Node.js 18+ is required; found Node.js $node_major."
 [ -n "${UPSTREAM:-}" ] || fail "UPSTREAM is not configured. Put it in $BRIDGE_ENV_FILE or the launchd environment."
 [ -n "${VISION_API_KEY:-}" ] || fail "VISION_API_KEY is not configured. Put it in $BRIDGE_ENV_FILE or the launchd environment."
+[ -n "${VISION_BASE_URL:-}" ] || fail "VISION_BASE_URL is not configured. Put it in $BRIDGE_ENV_FILE or the launchd environment."
+[ -n "${VISION_MODEL:-}" ] || fail "VISION_MODEL is not configured. Put it in $BRIDGE_ENV_FILE or the launchd environment."
 
 if ! command -v lsof >/dev/null 2>&1; then
     fail "lsof is required to verify bridge port ownership on macOS."
