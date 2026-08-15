@@ -235,14 +235,26 @@ CC Switch 路由处理：自动配置当前活动供应商到 Vision Bridge
 CC Switch app 类型：claude-desktop
 
 严格使用以下配置，不要猜测、替换或要求重复提供：
-- UPSTREAM（真实文本上游）：https://tokenrhythm.studio/v1
-- 文本 API Key：已在 CC Switch 中配置；不得读取、打印或写入 bridge.env
-- 文本 Model：deepseek-v4-flash-0731；由 CC Switch 保持，不得写入 bridge.env
-- VISION_BASE_URL：https://api.stepfun.com/v1
-- VISION_MODEL：step-3.7-flash
-- VISION_API_KEY：使用本次会话已提供的真实密钥；只写入 ~/.claude/bridge/bridge.env，文件权限必须为 600，绝不能回显
-- BRIDGE_HOST：127.0.0.1
-- BRIDGE_PORT：15720
+
+纯文本 DeepSeek 模型：
+- Base URL: https://tokenrhythm.studio/v1
+- API Key: 已在 CC Switch 中配置
+- Model: deepseek-v4-flash-0731
+
+视觉模型：
+- Base URL: https://api.stepfun.com/v1
+- API Key: 使用本次会话已提供的真实密钥
+- Model: step-3.7-flash
+
+Bridge 运行参数：
+- Host: 127.0.0.1
+- Port: 15720
+
+配置映射：
+- 纯文本模型 Base URL 写入 `UPSTREAM`；不得把桥地址写入 `UPSTREAM`。
+- 视觉模型 Base URL、API Key 和 Model 分别写入 `VISION_BASE_URL`、`VISION_API_KEY`、`VISION_MODEL`。
+- 视觉 API Key 只写入 `~/.claude/bridge/bridge.env`，文件权限必须为 600，绝不能回显。
+- 文本 API Key 和 Model 由 CC Switch 保持，不得读取、打印或写入 `bridge.env`。
 
 按以下顺序操作：
 
