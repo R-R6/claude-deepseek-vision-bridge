@@ -276,7 +276,7 @@ CC Switch app 类型：claude-desktop
 
 8. 路由切换必须是独立的最后阶段。若当前状态检查已经指向 15720，不要关闭 CC Switch：
    sh "$HOME/.claude/bridge/configure-ccswitch-route.sh" \
-     --cc-switch-directory "$HOME/.cc-switch" \
+     --ccswitch-directory "$HOME/.cc-switch" \
      --app-type claude-desktop \
      --status
 
@@ -288,7 +288,7 @@ CC Switch app 类型：claude-desktop
      --bridge-port 15720 \
      --force-close-ccswitch
 
-   该命令只在明确传入 --force-close-ccswitch 后才会验证并优雅退出当前用户的 CC Switch，创建可恢复 SQLite 备份，修改当前 claude-desktop provider，然后重新打开 CC Switch 并等待 15721。不得读取、打印或修改文本 Key、文本 Model、其他 provider、UPSTREAM 或未知路由器；失败时应恢复原路由并尽力恢复 CC Switch 原始运行状态。当前 Claude 会话通常可以在 CC Switch 重开后继续，但活跃流式请求不保证，不能把该切换放在当前会话中执行。
+   该命令只在明确传入 --force-close-ccswitch 后才会验证并优雅退出当前用户的 CC Switch，创建可恢复 SQLite 备份，修改当前 claude-desktop provider，然后重新打开 CC Switch 并等待 15721。即使数据库暂时没有打开的文件句柄，只要检测到 CC Switch 正在运行也会遵守这个授权边界；目标已经是 15720 时始终无害重跑，不会因为 force 选项关闭应用。不得读取、打印或修改文本 Key、文本 Model、其他 provider、UPSTREAM 或未知路由器；失败时应先确保 CC Switch 关闭，再恢复原路由，并用受保护备份复核后再尽力恢复原始运行状态。当前 Claude 会话通常可以在 CC Switch 重开后继续，但活跃流式请求不保证，不能把该切换放在当前会话中执行。
 
 9. 运行只读诊断：
    sh "$HOME/.claude/bridge/diagnose-vision-bridge.sh" --app-type claude-desktop
@@ -372,7 +372,7 @@ sh "$HOME/.claude/bridge/configure-ccswitch-route.sh" \
   --force-close-ccswitch
 ```
 
-`--force-close-ccswitch` 会验证当前用户、CC Switch bundle 和唯一可执行进程，优雅退出应用，等待数据库及 WAL/SHM 文件释放，备份并更新路由，重新打开 CC Switch，等待 15721 恢复，再验证目标为 `http://127.0.0.1:15720`。如果 CC Switch 原本没有运行，成功后不会擅自启动它。若重启或验证失败，会尝试恢复 SQLite 备份和原始应用状态。不要在当前正经 CC Switch 路由的 Claude 会话中执行此阶段；活跃流式请求可能失败，即使对话通常可以在应用重开后继续。
+`--force-close-ccswitch` 会验证当前用户、CC Switch bundle 和唯一可执行进程，优雅退出应用，等待数据库及 WAL/SHM 文件释放，备份并更新路由，重新打开 CC Switch，等待 15721 恢复，再验证目标为 `http://127.0.0.1:15720`。如果 CC Switch 原本没有运行，成功后不会擅自启动它。若重启或验证失败，会先确保应用关闭、恢复并完整性检查 SQLite 备份、比较原路由，再恢复原始应用状态；备份缺失或不匹配时会保留应用停止并报告备份路径。不要在当前正经 CC Switch 路由的 Claude 会话中执行此阶段；活跃流式请求可能失败，即使对话通常可以在应用重开后继续。
 
 底层 Node 更新器仍可用于已经确认 CC Switch 已退出的受控场景：
 

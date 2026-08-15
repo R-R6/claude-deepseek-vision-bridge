@@ -129,18 +129,16 @@ route_detail="route check skipped by request"
 if [ "$SKIP_ROUTE_CHECK" -eq 0 ] && [ -x "$BRIDGE_NODE" ] && [ -f "$BRIDGE_DIR/configure-ccswitch-route.js" ]; then
     route_output=$("$BRIDGE_NODE" "$BRIDGE_DIR/configure-ccswitch-route.js" \
         --cc-switch-directory "$CCSWITCH_DIR" --app-type "$ROUTE_APP_TYPE" --status 2>&1 || true)
-    case "$BRIDGE_HOST" in
-        *:*) expected_route="http://[${BRIDGE_HOST}]:${BRIDGE_PORT}" ;;
-        *) expected_route="http://${BRIDGE_HOST}:${BRIDGE_PORT}" ;;
-    esac
-    route_line=$(printf '%s\n' "$route_output" | grep "current route:" | tail -n 1 || true)
-    route_value=$(printf '%s\n' "$route_line" | sed 's/.*current route: //')
-    if [ "$route_value" = "$expected_route" ] || [ "$route_value" = "${expected_route}/" ]; then
+    route_check_output=$("$BRIDGE_NODE" "$BRIDGE_DIR/configure-ccswitch-route.js" \
+        --cc-switch-directory "$CCSWITCH_DIR" --app-type "$ROUTE_APP_TYPE" \
+        --bridge-host "$BRIDGE_HOST" --bridge-port "$BRIDGE_PORT" --check-target 2>&1)
+    route_check_status=$?
+    if [ "$route_check_status" -eq 0 ]; then
         route_status="PASS"
-        route_detail=$(printf '%s' "$route_output" | tr '\n' ' ')
+        route_detail=$(printf '%s\n%s' "$route_output" "$route_check_output" | tr '\n' ' ')
     else
         route_status="WARN"
-        route_detail=$(printf '%s' "$route_output" | tr '\n' ' ')
+        route_detail=$(printf '%s\n%s' "$route_output" "$route_check_output" | tr '\n' ' ')
     fi
 fi
 if [ "$SKIP_ROUTE_CHECK" -eq 1 ]; then

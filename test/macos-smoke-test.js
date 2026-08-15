@@ -13,6 +13,8 @@ if (process.platform !== "darwin") {
 
 const sourceDir = path.join(__dirname, "..", "src");
 const nodePath = process.execPath;
+const ccSwitchProcessRunning = process.platform === "darwin"
+  && run("/usr/bin/pgrep", ["-x", "cc-switch"]).status === 0;
 
 function getDatabaseSync() {
   try {
@@ -188,6 +190,7 @@ async function main() {
   const settingsPath = path.join(routeDir, "settings.json");
   const backupDirectory = path.join(root, "route-backup");
   const authenticatedBackupDirectory = path.join(root, "authenticated-route-backup");
+  const restoreBackupDirectory = path.join(root, "restore-route-backup");
   const authenticatedBridgeEnvFile = path.join(root, "authenticated-bridge.env");
   const ccSwitchAppPath = path.join(root, "CC Switch.app");
   fs.mkdirSync(home, { recursive: true });
@@ -363,7 +366,7 @@ printf '%s\n' "17"
     assert.equal((fs.statSync(path.join(bridgeDir, "bridge.env")).mode & 0o077), 0);
     assert.notEqual(fs.statSync(path.join(home, ".claude", "skills", "vision", "vision.sh")).mode & 0o111, 0);
 
-    if (DatabaseSync) {
+    if (DatabaseSync && !ccSwitchProcessRunning) {
       const routeEnvironment = { ...process.env };
       delete routeEnvironment.BRIDGE_AUTH_TOKEN;
       fs.mkdirSync(backupDirectory, { recursive: true, mode: 0o755 });
@@ -385,6 +388,15 @@ printf '%s\n' "17"
       assert.equal(readProviderValue(DatabaseSync, databasePath, "$.env.ANTHROPIC_AUTH_TOKEN"), "mac-route-test-secret");
       assert.doesNotMatch(`${routeResult.stdout}\n${routeResult.stderr}`, /mac-route-test-secret/);
 
+      const healthOnlyResult = await runAsync(nodePath, [
+        path.join(sourceDir, "configure-ccswitch-route.js"),
+        "--bridge-port", String(healthPort),
+        "--bridge-env-file", path.join(root, "missing-bridge.env"),
+        "--health-only",
+      ], { env: routeEnvironment });
+      assert.equal(healthOnlyResult.status, 0, `${healthOnlyResult.stdout}\n${healthOnlyResult.stderr}`);
+      assert.match(healthOnlyResult.stdout, /managed version 0\.2\.1/);
+
       const authenticatedRouteResult = await runAsync(nodePath, [
         path.join(sourceDir, "configure-ccswitch-route.js"),
         "--database", databasePath,
@@ -400,6 +412,7 @@ printf '%s\n' "17"
       assert.equal(readProviderValue(DatabaseSync, databasePath, "$.env.ANTHROPIC_AUTH_TOKEN"), "mac-route-test-secret");
       assert.doesNotMatch(`${authenticatedRouteResult.stdout}\n${authenticatedRouteResult.stderr}`, /mac-route-health-token|mac-route-test-secret/);
 
+      const wrapperEnvironment = { ...routeEnvironment, BRIDGE_DIR: sourceDir };
       const heldDatabase = new DatabaseSync(databasePath);
       try {
         const noOpWhileRunningResult = await runAsync(nodePath, [
@@ -424,7 +437,6 @@ printf '%s\n' "17"
         heldDatabase.prepare(
           "UPDATE providers SET settings_config = json_set(settings_config, '$.env.ANTHROPIC_BASE_URL', ?)",
         ).run("https://text.example/v1");
-        const wrapperEnvironment = { ...routeEnvironment, BRIDGE_DIR: sourceDir };
         const refusedWhileRunningResult = await runAsync("sh", [
           path.join(sourceDir, "configure-ccswitch-route.sh"),
           "--ccswitch-directory", routeDir,
@@ -437,12 +449,77 @@ printf '%s\n' "17"
         assert.notEqual(refusedWhileRunningResult.status, 0);
         assert.match(
           `${refusedWhileRunningResult.stdout}\n${refusedWhileRunningResult.stderr}`,
-          /CC Switch was not changed|database is in use/,
+          /CC Switch was not changed|database is in use|route is not/,
         );
         assert.equal(readRoute(DatabaseSync, databasePath), "https://text.example/v1");
       } finally {
         heldDatabase.close();
       }
+
+      const sidecarPath = `${databasePath}-wal`;
+      fs.writeFileSync(sidecarPath, "sidecar-lock-test", "utf8");
+      const sidecarHandle = fs.openSync(sidecarPath, "r");
+      try {
+        const sidecarLockResult = await runAsync(nodePath, [
+          path.join(sourceDir, "configure-ccswitch-route.js"),
+          "--database", databasePath,
+          "--settings", settingsPath,
+          "--app-type", "claude-desktop",
+          "--bridge-port", String(authenticatedHealthPort),
+          "--bridge-env-file", authenticatedBridgeEnvFile,
+        ], { env: routeEnvironment });
+        assert.notEqual(sidecarLockResult.status, 0);
+        assert.match(
+          `${sidecarLockResult.stdout}\n${sidecarLockResult.stderr}`,
+          /database is in use|process is running/,
+        );
+        assert.equal(readRoute(DatabaseSync, databasePath), "https://text.example/v1");
+      } finally {
+        fs.closeSync(sidecarHandle);
+        if (fs.existsSync(sidecarPath)) fs.unlinkSync(sidecarPath);
+      }
+
+      const restoreRouteResult = await runAsync(nodePath, [
+        path.join(sourceDir, "configure-ccswitch-route.js"),
+        "--database", databasePath,
+        "--settings", settingsPath,
+        "--backup-directory", restoreBackupDirectory,
+        "--app-type", "claude-desktop",
+        "--bridge-port", String(authenticatedHealthPort),
+        "--bridge-env-file", authenticatedBridgeEnvFile,
+      ], { env: routeEnvironment });
+      assert.equal(restoreRouteResult.status, 0, `${restoreRouteResult.stdout}\n${restoreRouteResult.stderr}`);
+
+      const compareBackupResult = await runAsync(nodePath, [
+        path.join(sourceDir, "configure-ccswitch-route.js"),
+        "--database", databasePath,
+        "--settings", settingsPath,
+        "--app-type", "claude-desktop",
+        "--compare-database", path.join(restoreBackupDirectory, "cc-switch.db"),
+      ], { env: routeEnvironment });
+      assert.equal(compareBackupResult.status, 3, `${compareBackupResult.stdout}\n${compareBackupResult.stderr}`);
+      assert.match(compareBackupResult.stderr, /protected backup/);
+
+      const forcedNoOpResult = await runAsync("sh", [
+        path.join(sourceDir, "configure-ccswitch-route.sh"),
+        "--ccswitch-directory", routeDir,
+        "--ccswitch-app", path.join(root, "missing-cc-switch.app"),
+        "--app-type", "claude-desktop",
+        "--bridge-port", String(authenticatedHealthPort),
+        "--bridge-env-file", authenticatedBridgeEnvFile,
+        "--force-close-ccswitch",
+      ], { env: wrapperEnvironment });
+      assert.equal(forcedNoOpResult.status, 0, `${forcedNoOpResult.stdout}\n${forcedNoOpResult.stderr}`);
+      assert.match(forcedNoOpResult.stdout, /already targets/);
+
+      const aliasStatusResult = await runAsync("sh", [
+        path.join(sourceDir, "configure-ccswitch-route.sh"),
+        "--cc-switch-directory", routeDir,
+        "--app-type", "claude-desktop",
+        "--status",
+      ], { env: wrapperEnvironment });
+      assert.equal(aliasStatusResult.status, 0, `${aliasStatusResult.stdout}\n${aliasStatusResult.stderr}`);
+      assert.match(aliasStatusResult.stdout, /current route:/);
 
       const bypassResult = run(nodePath, [
         path.join(sourceDir, "configure-ccswitch-route.js"),
@@ -523,8 +600,10 @@ printf '%s\n' "17"
         `${mismatchedSettingsResult.stdout}\n${mismatchedSettingsResult.stderr}`,
         /does not match the database/,
       );
-    } else {
+    } else if (!DatabaseSync) {
       console.log("macOS CC Switch route smoke test: SKIP (node:sqlite unavailable)");
+    } else {
+      console.log("macOS CC Switch route smoke test: SKIP (CC Switch is running; route mutation requires it to be stopped)");
     }
 
     const skillEnvironment = { ...process.env, HOME: home };

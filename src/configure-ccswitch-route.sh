@@ -23,16 +23,17 @@ DATABASE_PATH=
 SETTINGS_PATH=
 BACKUP_DIRECTORY=
 HEALTH_TIMEOUT_MS=3000
-FORCE=0
 FORCE_CLOSE=0
 STATUS=0
 WAIT_TIMEOUT_SECONDS=30
 ORIGINAL_RUNNING=0
 APP_CLOSED=0
-ROUTE_UPDATED=0
+ROLLBACK_NEEDED=0
 BACKUP_PATH=
+BACKUP_PROBE=
 TEMP_OUTPUT=
 CCSWITCH_PID=
+TARGET_ROUTE=
 
 usage() {
     cat <<'EOF'
@@ -42,6 +43,7 @@ Options:
   --force-close-ccswitch        Explicitly allow closing/restarting CC Switch.
   --ccswitch-app PATH            CC Switch app bundle (default: /Applications/CC Switch.app).
   --ccswitch-directory PATH      CC Switch data directory (default: ~/.cc-switch).
+  --cc-switch-directory PATH     Alias for --ccswitch-directory.
   --ccswitch-port PORT           CC Switch local proxy port (default: 15721).
   --ccswitch-timeout-seconds N   Wait timeout for close/restart (default: 30).
   --app-type TYPE                auto, claude, or claude-desktop (default: auto).
@@ -52,7 +54,6 @@ Options:
   --settings PATH                Override the CC Switch settings path.
   --backup-directory PATH        Override the SQLite backup directory.
   --health-timeout-ms MS         Bridge health timeout.
-  --force                       Force a route rewrite when it already matches.
   --status                      Read and print the current route only.
   --help                        Show this help.
 EOF
@@ -80,7 +81,7 @@ while [ "$#" -gt 0 ]; do
             CCSWITCH_APP_PATH=$2
             shift
             ;;
-        --ccswitch-directory)
+        --ccswitch-directory|--cc-switch-directory)
             [ "$#" -ge 2 ] || { usage >&2; exit 2; }
             CCSWITCH_DIR=$2
             shift
@@ -135,7 +136,6 @@ while [ "$#" -gt 0 ]; do
             HEALTH_TIMEOUT_MS=$2
             shift
             ;;
-        --force) FORCE=1 ;;
         --status) STATUS=1 ;;
         --help) usage; exit 0 ;;
         *) printf '%s\n' "unknown option: $1" >&2; usage >&2; exit 2 ;;
@@ -156,12 +156,20 @@ DATABASE_PATH=${DATABASE_PATH:-"${CCSWITCH_DIR}/cc-switch.db"}
 SETTINGS_PATH=${SETTINGS_PATH:-"${CCSWITCH_DIR}/settings.json"}
 
 cleanup() {
-    [ -n "$TEMP_OUTPUT" ] && rm -f "$TEMP_OUTPUT"
+    if [ -n "$TEMP_OUTPUT" ]; then
+        rm -f "$TEMP_OUTPUT"
+    fi
+    if [ -n "$BACKUP_PROBE" ]; then
+        rm -f "$BACKUP_PROBE"
+    fi
 }
 
 restore_database() {
-    [ -n "$BACKUP_PATH" ] || return 0
-    [ -f "$BACKUP_PATH" ] || return 0
+    [ -n "$BACKUP_PATH" ] || return 1
+    [ -f "$BACKUP_PATH" ] || return 1
+    "$BRIDGE_NODE" "$ROUTE_SCRIPT" \
+        --database "$BACKUP_PATH" \
+        --verify-database >/dev/null 2>&1 || return 1
     restore_dir=$(dirname "$BACKUP_PATH")
     timestamp=$(date +%Y%m%d-%H%M%S)
     for sidecar in "$DATABASE_PATH-wal" "$DATABASE_PATH-shm"; do
@@ -172,33 +180,6 @@ restore_database() {
     cp -p "$BACKUP_PATH" "$DATABASE_PATH"
     chmod 600 "$DATABASE_PATH"
 }
-
-reopen_original_app() {
-    [ "$ORIGINAL_RUNNING" -eq 1 ] || return 0
-    if validate_ccswitch_process >/dev/null 2>&1; then
-        return 0
-    fi
-    if get_ccswitch_pids | grep -q .; then
-        /usr/bin/osascript -e 'tell application "CC Switch" to quit' >/dev/null 2>&1 || return 1
-        wait_for_database_release || return 1
-    fi
-    /usr/bin/open -a "$CCSWITCH_APP_PATH" >/dev/null 2>&1 || return 1
-    wait_for_ccswitch
-}
-
-finish() {
-    exit_code=$?
-    if [ "$exit_code" -ne 0 ] && [ "$APP_CLOSED" -eq 1 ] && [ "$ORIGINAL_RUNNING" -eq 1 ]; then
-        if [ "$ROUTE_UPDATED" -eq 1 ]; then
-            restore_database || printf '%s\n' "Warning: route database rollback failed; backup retained at $BACKUP_PATH" >&2
-        fi
-        reopen_original_app || printf '%s\n' "Warning: CC Switch could not be restored automatically" >&2
-    fi
-    cleanup
-    exit "$exit_code"
-}
-trap finish EXIT
-trap 'exit 130' HUP INT TERM
 
 get_ccswitch_pids() {
     /usr/bin/pgrep -x "$CCSWITCH_EXECUTABLE_NAME" 2>/dev/null || true
@@ -250,12 +231,131 @@ wait_for_ccswitch() {
     return 1
 }
 
-run_route_updater() {
+verify_route_target() {
+    route_command \
+        --bridge-host "$BRIDGE_HOST" \
+        --bridge-port "$BRIDGE_PORT" \
+        --check-target
+}
+
+verify_route_matches_backup() {
+    [ -n "$BACKUP_PATH" ] || return 1
+    [ -f "$BACKUP_PATH" ] || return 1
+    route_command \
+        --compare-database "$BACKUP_PATH"
+}
+
+verify_ccswitch_app() {
+    [ -d "$CCSWITCH_APP_PATH" ] || fail "CC Switch app was not found: $CCSWITCH_APP_PATH"
+    [ -f "$CCSWITCH_APP_PATH/Contents/Info.plist" ] || fail "CC Switch Info.plist was not found: $CCSWITCH_APP_PATH"
+    CCSWITCH_EXECUTABLE_NAME=$(plutil -extract CFBundleExecutable raw -o - "$CCSWITCH_APP_PATH/Contents/Info.plist" 2>/dev/null || true)
+    [ "$CCSWITCH_EXECUTABLE_NAME" = cc-switch ] || fail "CC Switch executable identity could not be verified"
+    CCSWITCH_EXECUTABLE_PATH=$CCSWITCH_APP_PATH/Contents/MacOS/$CCSWITCH_EXECUTABLE_NAME
+    [ -x "$CCSWITCH_EXECUTABLE_PATH" ] || fail "CC Switch executable was not found: $CCSWITCH_EXECUTABLE_PATH"
+}
+
+prepare_backup_directory() {
+    if [ -e "$BACKUP_DIRECTORY" ] || [ -L "$BACKUP_DIRECTORY" ]; then
+        [ -d "$BACKUP_DIRECTORY" ] || fail "protected CC Switch backup path is not a directory: $BACKUP_DIRECTORY"
+        [ ! -L "$BACKUP_DIRECTORY" ] || fail "protected CC Switch backup directory is a symlink: $BACKUP_DIRECTORY"
+    else
+        mkdir -p "$BACKUP_DIRECTORY" || fail "could not create protected CC Switch backup directory: $BACKUP_DIRECTORY"
+    fi
+    chmod 700 "$BACKUP_DIRECTORY" || fail "could not secure protected CC Switch backup directory: $BACKUP_DIRECTORY"
+    BACKUP_PROBE=$(mktemp "$BACKUP_DIRECTORY/.vision-bridge-write.XXXXXX") \
+        || fail "protected CC Switch backup directory is not writable: $BACKUP_DIRECTORY"
+    rm -f "$BACKUP_PROBE" || fail "could not clean protected CC Switch backup probe: $BACKUP_PROBE"
+    BACKUP_PROBE=
+}
+
+close_verified_ccswitch() {
+    validate_ccswitch_process || return 1
+    /usr/bin/osascript -e 'tell application "CC Switch" to quit' >/dev/null 2>&1 || return 1
+    APP_CLOSED=1
+    ROLLBACK_NEEDED=1
+    wait_for_database_release
+}
+
+prepare_ccswitch_for_update() {
+    if ! get_ccswitch_pids | grep -q .; then
+        return 0
+    fi
+    [ "$FORCE_CLOSE" -eq 1 ] || fail "CC Switch is running and its route is not $TARGET_ROUTE; use --force-close-ccswitch from an independent Terminal to change it"
+    ORIGINAL_RUNNING=1
+    if [ -z "$CCSWITCH_EXECUTABLE_PATH" ]; then
+        verify_ccswitch_app
+    fi
+    validate_ccswitch_process || fail "CC Switch process identity could not be verified; refusing to close it"
+    run_bridge_health || fail "Vision Bridge must be healthy before CC Switch is closed"
+    close_verified_ccswitch || fail "could not close CC Switch or release its database"
+}
+
+ensure_ccswitch_closed_for_recovery() {
+    if ! get_ccswitch_pids | grep -q .; then
+        wait_for_database_release
+        return
+    fi
+    validate_ccswitch_process || return 1
+    /usr/bin/osascript -e 'tell application "CC Switch" to quit' >/dev/null 2>&1 || return 1
+    wait_for_database_release
+}
+
+reopen_original_app() {
+    [ "$ORIGINAL_RUNNING" -eq 1 ] || return 0
+    if get_ccswitch_pids | grep -q .; then
+        validate_ccswitch_process || return 1
+        /usr/bin/osascript -e 'tell application "CC Switch" to quit' >/dev/null 2>&1 || return 1
+        wait_for_database_release || return 1
+    fi
+    /usr/bin/open -a "$CCSWITCH_APP_PATH" >/dev/null 2>&1 || return 1
+    wait_for_ccswitch || return 1
+}
+
+finish() {
+    exit_code=$?
+    if [ "$exit_code" -ne 0 ] && [ "$APP_CLOSED" -eq 1 ]; then
+        recovery_ok=1
+        ensure_ccswitch_closed_for_recovery || recovery_ok=0
+        if [ "$recovery_ok" -eq 1 ] && [ "$ROLLBACK_NEEDED" -eq 1 ]; then
+            restore_database || {
+                printf '%s\n' "Warning: route database rollback failed; backup retained at $BACKUP_PATH" >&2
+                recovery_ok=0
+            }
+        fi
+        if [ "$recovery_ok" -eq 1 ]; then
+            if [ "$ROLLBACK_NEEDED" -eq 1 ]; then
+                verify_route_matches_backup || {
+                    printf '%s\n' "Warning: restored CC Switch route did not match the protected backup; CC Switch was left stopped" >&2
+                    recovery_ok=0
+                }
+            fi
+        fi
+        if [ "$recovery_ok" -eq 1 ] && [ "$ORIGINAL_RUNNING" -eq 1 ]; then
+            reopen_original_app || {
+                printf '%s\n' "Warning: CC Switch could not be restored automatically" >&2
+            }
+        elif [ "$recovery_ok" -eq 0 ]; then
+            printf '%s\n' "Warning: CC Switch was left stopped so the original route can be recovered from $BACKUP_PATH" >&2
+        fi
+    fi
+    cleanup
+    exit "$exit_code"
+}
+trap finish EXIT
+trap 'exit 130' HUP INT TERM
+
+route_command() {
     set -- "$BRIDGE_NODE" "$ROUTE_SCRIPT" \
         --cc-switch-directory "$CCSWITCH_DIR" \
         --database "$DATABASE_PATH" \
         --settings "$SETTINGS_PATH" \
         --app-type "$APP_TYPE" \
+        "$@"
+    "$@"
+}
+
+run_route_updater() {
+    set -- \
         --bridge-host "$BRIDGE_HOST" \
         --bridge-port "$BRIDGE_PORT" \
         --bridge-env-file "$BRIDGE_ENV_FILE" \
@@ -263,77 +363,87 @@ run_route_updater() {
     if [ -n "$BACKUP_DIRECTORY" ]; then
         set -- "$@" --backup-directory "$BACKUP_DIRECTORY"
     fi
-    if [ "$FORCE" -eq 1 ]; then
-        set -- "$@" --force
-    fi
-    "$@"
+    route_command "$@"
+}
+
+run_route_status() {
+    route_command --status
+}
+
+run_route_target_check() {
+    route_command \
+        --bridge-host "$BRIDGE_HOST" \
+        --bridge-port "$BRIDGE_PORT" \
+        --check-target
+}
+
+run_bridge_health() {
+    "$BRIDGE_NODE" "$ROUTE_SCRIPT" \
+        --bridge-host "$BRIDGE_HOST" \
+        --bridge-port "$BRIDGE_PORT" \
+        --bridge-env-file "$BRIDGE_ENV_FILE" \
+        --health-timeout-ms "$HEALTH_TIMEOUT_MS" \
+        --health-only
 }
 
 if [ "$STATUS" -eq 1 ]; then
-    exec "$BRIDGE_NODE" "$ROUTE_SCRIPT" \
-        --cc-switch-directory "$CCSWITCH_DIR" \
-        --database "$DATABASE_PATH" \
-        --settings "$SETTINGS_PATH" \
-        --app-type "$APP_TYPE" \
-        --status
+    run_route_status
+    exit 0
 fi
 
-# A first attempt avoids closing CC Switch when the route is already correct,
-# and also handles an initially stopped app without changing its state.
+# Read the route before looking at the running app. A correct route is always
+# a no-op, even when --force-close-ccswitch was supplied.
+case "$BRIDGE_HOST" in
+    *:*) TARGET_ROUTE="http://[${BRIDGE_HOST}]:${BRIDGE_PORT}" ;;
+    *) TARGET_ROUTE="http://${BRIDGE_HOST}:${BRIDGE_PORT}" ;;
+esac
 TEMP_OUTPUT=$(mktemp "${TMPDIR:-/tmp}/vision-bridge-route.XXXXXX")
 set +e
-run_route_updater >"$TEMP_OUTPUT" 2>&1
+run_route_target_check >"$TEMP_OUTPUT" 2>&1
 route_status=$?
 set -e
 if [ "$route_status" -eq 0 ]; then
-    cat "$TEMP_OUTPUT"
+    run_route_updater
     exit 0
 fi
-if ! grep -F "CC Switch database is in use" "$TEMP_OUTPUT" >/dev/null 2>&1; then
+if [ "$route_status" -ne 3 ]; then
     cat "$TEMP_OUTPUT" >&2
     exit "$route_status"
 fi
-if [ "$FORCE_CLOSE" -eq 0 ]; then
+
+# Re-check immediately before any process coordination so a concurrent route
+# correction remains a harmless no-op.
+set +e
+run_route_target_check >"$TEMP_OUTPUT" 2>&1
+route_status=$?
+set -e
+if [ "$route_status" -eq 0 ]; then
+    run_route_updater
+    exit 0
+fi
+if [ "$route_status" -ne 3 ]; then
     cat "$TEMP_OUTPUT" >&2
-    printf '%s\n' "CC Switch was not changed. If the route must be updated while CC Switch is running, use --force-close-ccswitch from an independent Terminal." >&2
     exit "$route_status"
 fi
 
-[ -d "$CCSWITCH_APP_PATH" ] || fail "CC Switch app was not found: $CCSWITCH_APP_PATH"
-[ -f "$CCSWITCH_APP_PATH/Contents/Info.plist" ] || fail "CC Switch Info.plist was not found: $CCSWITCH_APP_PATH"
-CCSWITCH_EXECUTABLE_NAME=$(plutil -extract CFBundleExecutable raw -o - "$CCSWITCH_APP_PATH/Contents/Info.plist" 2>/dev/null || true)
-[ "$CCSWITCH_EXECUTABLE_NAME" = cc-switch ] || fail "CC Switch executable identity could not be verified"
-CCSWITCH_EXECUTABLE_PATH=$CCSWITCH_APP_PATH/Contents/MacOS/$CCSWITCH_EXECUTABLE_NAME
-[ -x "$CCSWITCH_EXECUTABLE_PATH" ] || fail "CC Switch executable was not found: $CCSWITCH_EXECUTABLE_PATH"
-
-if validate_ccswitch_process; then
-    ORIGINAL_RUNNING=1
-else
-    if get_ccswitch_pids | grep -q .; then
-        fail "CC Switch process identity could not be verified; refusing to close it"
-    fi
-    if database_in_use; then
-        fail "CC Switch database is held by an unknown process; refusing to overwrite it"
-    fi
+if [ -z "$BACKUP_DIRECTORY" ]; then
+    BACKUP_DIRECTORY="$CCSWITCH_DIR/backups/vision-bridge-$(date +%Y%m%d%H%M%S)-$$"
 fi
+BACKUP_PATH="$BACKUP_DIRECTORY/cc-switch.db"
+[ ! -e "$BACKUP_PATH" ] || fail "protected CC Switch backup already exists: $BACKUP_PATH"
+[ ! -L "$BACKUP_PATH" ] || fail "protected CC Switch backup path is a symlink: $BACKUP_PATH"
+prepare_backup_directory
 
-if [ "$ORIGINAL_RUNNING" -eq 1 ]; then
-    /usr/bin/osascript -e 'tell application "CC Switch" to quit' >/dev/null 2>&1 \
-        || fail "could not request CC Switch to quit"
-    APP_CLOSED=1
-    wait_for_database_release || fail "CC Switch database did not become free within ${WAIT_TIMEOUT_SECONDS}s"
-fi
-
+prepare_ccswitch_for_update
 run_route_updater >"$TEMP_OUTPUT" 2>&1 || {
     cat "$TEMP_OUTPUT" >&2
     exit 1
 }
 cat "$TEMP_OUTPUT"
-BACKUP_PATH=$(sed -n 's/.*Backup: //p' "$TEMP_OUTPUT" | tail -n 1)
 if [ "$ORIGINAL_RUNNING" -eq 1 ]; then
-    ROUTE_UPDATED=1
     /usr/bin/open -a "$CCSWITCH_APP_PATH" >/dev/null 2>&1 || fail "CC Switch could not be reopened"
     wait_for_ccswitch || fail "CC Switch did not restore its verified 15721 listener"
+    verify_route_target || fail "CC Switch reopened but its active provider route was not restored"
 fi
 
 exit 0

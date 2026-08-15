@@ -23,7 +23,10 @@ function parseArgs(argv) {
     bridgePort: 15720,
     bridgeEnvFile: path.join(os.homedir(), ".claude", "bridge", "bridge.env"),
     healthTimeoutMs: 3000,
-    force: false,
+    healthOnly: false,
+    checkTarget: false,
+    compareDatabasePath: "",
+    verifyDatabasePath: "",
     status: false,
   };
   const valueOptions = new Map([
@@ -36,22 +39,29 @@ function parseArgs(argv) {
     ["--bridge-port", "bridgePort"],
     ["--bridge-env-file", "bridgeEnvFile"],
     ["--health-timeout-ms", "healthTimeoutMs"],
+    ["--compare-database", "compareDatabasePath"],
+    ["--verify-database", "verifyDatabasePath"],
   ]);
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index];
     if (argument === "--help") {
       process.stdout.write(
-        "Usage: configure-ccswitch-route.js [--status] "
-        + "[--app-type auto|claude|claude-desktop] [--bridge-port PORT] [--bridge-env-file PATH]\n",
+        "Usage: configure-ccswitch-route.js [--status|--health-only|--check-target] "
+        + "[--app-type auto|claude|claude-desktop] [--bridge-port PORT] [--bridge-env-file PATH]"
+        + " [--compare-database PATH] [--verify-database PATH]\n",
       );
       process.exit(0);
     }
-    if (argument === "--force") {
-      options.force = true;
-      continue;
-    }
     if (argument === "--status") {
       options.status = true;
+      continue;
+    }
+    if (argument === "--health-only") {
+      options.healthOnly = true;
+      continue;
+    }
+    if (argument === "--check-target") {
+      options.checkTarget = true;
       continue;
     }
     const optionName = valueOptions.get(argument);
@@ -59,6 +69,16 @@ function parseArgs(argv) {
       throw new Error(`unknown or incomplete option: ${argument}`);
     }
     options[optionName] = argv[++index];
+  }
+  const modeCount = [
+    options.healthOnly,
+    options.checkTarget,
+    Boolean(options.compareDatabasePath),
+    Boolean(options.verifyDatabasePath),
+    options.status,
+  ].filter(Boolean).length;
+  if (modeCount > 1) {
+    throw new Error("--status, --health-only, --check-target, --compare-database, and --verify-database are mutually exclusive");
   }
   if (!options.databasePath) {
     options.databasePath = path.join(options.ccSwitchDirectory, "cc-switch.db");
@@ -104,16 +124,33 @@ function loadDatabase(DatabaseSync, databasePath, readOnly = false) {
 
 function assertDatabaseIsNotInUse(databasePath) {
   if (process.platform !== "darwin") return;
-  if (!fs.existsSync(databasePath)) return;
-  const result = spawnSync("/usr/sbin/lsof", ["-n", path.resolve(databasePath)], {
+  for (const suffix of ["", "-wal", "-shm"]) {
+    const candidatePath = `${path.resolve(databasePath)}${suffix}`;
+    if (!fs.existsSync(candidatePath)) continue;
+    const result = spawnSync("/usr/sbin/lsof", ["-n", candidatePath], {
+      encoding: "utf8",
+      windowsHide: true,
+    });
+    if (result.error || (result.status !== 0 && result.status !== 1)) {
+      throw new Error("could not verify that the CC Switch database is closed");
+    }
+    if (result.status === 0 && result.stdout.trim()) {
+      throw new Error("CC Switch database is in use; quit CC Switch before changing its route");
+    }
+  }
+}
+
+function assertCCSwitchProcessIsNotRunning() {
+  if (process.platform !== "darwin") return;
+  const result = spawnSync("/usr/bin/pgrep", ["-x", "cc-switch"], {
     encoding: "utf8",
     windowsHide: true,
   });
   if (result.error || (result.status !== 0 && result.status !== 1)) {
-    throw new Error("could not verify that the CC Switch database is closed");
+    throw new Error("could not verify that CC Switch is stopped");
   }
   if (result.status === 0 && result.stdout.trim()) {
-    throw new Error("CC Switch database is in use; quit CC Switch before changing its route");
+    throw new Error("CC Switch process is running; close CC Switch before changing its route");
   }
 }
 
@@ -283,8 +320,35 @@ function loadSqlite() {
 }
 
 function backupDatabase(database, backupPath) {
+  try {
+    fs.lstatSync(backupPath);
+    throw new Error(`CC Switch backup already exists: ${backupPath}`);
+  } catch (error) {
+    if (error.code !== "ENOENT") throw error;
+  }
   const escapedBackupPath = backupPath.replace(/'/g, "''");
   database.exec(`VACUUM INTO '${escapedBackupPath}'`);
+}
+
+function verifyDatabaseIntegrity(DatabaseSync, databasePath) {
+  const database = new DatabaseSync(databasePath, { readOnly: true });
+  try {
+    const result = database.prepare("PRAGMA integrity_check").get();
+    if (!result || result.integrity_check !== "ok") {
+      throw new Error("CC Switch SQLite backup failed integrity_check");
+    }
+  } finally {
+    database.close();
+  }
+}
+
+function verifyDatabaseBackup(DatabaseSync, backupPath) {
+  try {
+    verifyDatabaseIntegrity(DatabaseSync, backupPath);
+  } catch (error) {
+    try { fs.unlinkSync(backupPath); } catch {}
+    throw error;
+  }
 }
 
 function reportStatus(database, row) {
@@ -296,7 +360,18 @@ function reportStatus(database, row) {
 
 async function main() {
   const options = parseArgs(process.argv.slice(2));
+  if (options.healthOnly) {
+    const bridgeAuthToken = readBridgeAuthToken(options.bridgeEnvFile);
+    await checkBridgeHealth(options, bridgeAuthToken);
+    process.stdout.write(`Vision Bridge health passed for managed version ${EXPECTED_BRIDGE_VERSION}.\n`);
+    return;
+  }
   const DatabaseSync = loadSqlite();
+  if (options.verifyDatabasePath) {
+    verifyDatabaseIntegrity(DatabaseSync, options.verifyDatabasePath);
+    process.stdout.write("CC Switch SQLite database passed integrity check.\n");
+    return;
+  }
   const settings = loadSettings(options.settingsPath);
 
   // Read the current route before checking for a write lock. This makes a
@@ -307,35 +382,68 @@ async function main() {
   let currentRoute;
   try {
     row = chooseProvider(currentProviderRows(readDatabase, options.appType), settings, options.appType);
+    target = bridgeUrl(options);
+    const route = readProviderRoute(readDatabase, row);
+    if (options.checkTarget) {
+      if (route !== target) {
+        process.stderr.write(`CC Switch route does not match requested target ${target}.\n`);
+        process.exitCode = 3;
+        return;
+      }
+      process.stdout.write(`CC Switch route matches requested target ${target}.\n`);
+      return;
+    }
+    if (options.compareDatabasePath) {
+      const expectedDatabase = loadDatabase(DatabaseSync, options.compareDatabasePath, true);
+      try {
+        const expectedSettings = loadSettings(options.settingsPath);
+        const expectedRow = chooseProvider(
+          currentProviderRows(expectedDatabase, options.appType),
+          expectedSettings,
+          options.appType,
+        );
+        const expectedRoute = readProviderRoute(expectedDatabase, expectedRow);
+        if (route !== expectedRoute) {
+          process.stderr.write("CC Switch route does not match the protected backup.\n");
+          process.exitCode = 3;
+          return;
+        }
+      } finally {
+        expectedDatabase.close();
+      }
+      process.stdout.write("CC Switch route matches the protected backup.\n");
+      return;
+    }
     if (options.status) {
       reportStatus(readDatabase, row);
       return;
     }
-    target = bridgeUrl(options);
-    currentRoute = readProviderRoute(readDatabase, row);
+    currentRoute = route;
   } finally {
     readDatabase.close();
   }
 
   const bridgeAuthToken = readBridgeAuthToken(options.bridgeEnvFile);
   await checkBridgeHealth(options, bridgeAuthToken);
-  if (currentRoute === target && !options.force) {
+  if (currentRoute === target) {
     process.stdout.write(`CC Switch ${row.app_type} route already targets ${target}.\n`);
     return;
   }
 
+  assertCCSwitchProcessIsNotRunning();
   assertDatabaseIsNotInUse(options.databasePath);
   const database = loadDatabase(DatabaseSync, options.databasePath);
   try {
     // Re-read after the lock check so a concurrent provider change cannot be
     // overwritten based on the earlier read-only snapshot.
+    const writableSettings = loadSettings(options.settingsPath);
     const writableRow = chooseProvider(
       currentProviderRows(database, options.appType),
-      settings,
+      writableSettings,
       options.appType,
     );
     const writableRoute = readProviderRoute(database, writableRow);
-    if (writableRoute === target && !options.force) {
+    if (writableRoute === target) {
       process.stdout.write(`CC Switch ${writableRow.app_type} route already targets ${target}.\n`);
       return;
     }
@@ -349,9 +457,19 @@ async function main() {
     const backupPath = path.join(options.backupDirectory, "cc-switch.db");
     backupDatabase(database, backupPath);
     fs.chmodSync(backupPath, 0o600);
+    verifyDatabaseBackup(DatabaseSync, backupPath);
 
+    // Re-check immediately before acquiring the write lock. The coordinator
+    // normally keeps CC Switch closed, while this closes the remaining
+    // process-start race for direct updater callers.
+    assertCCSwitchProcessIsNotRunning();
     database.exec("BEGIN IMMEDIATE");
     try {
+      // A process can start after the preflight check but before SQLite grants
+      // the write lock. Refuse the write while the transaction is held, and
+      // check again before commit so a newly started CC Switch is not left
+      // beside a route mutation.
+      assertCCSwitchProcessIsNotRunning();
       const result = database.prepare(
         "UPDATE providers SET settings_config = json_set(settings_config, '$.env.ANTHROPIC_BASE_URL', ?) WHERE id = ? AND app_type = ?",
       ).run(target, writableRow.id, writableRow.app_type);
@@ -359,6 +477,7 @@ async function main() {
       if (readProviderRoute(database, writableRow) !== target) {
         throw new Error("CC Switch provider route verification failed");
       }
+      assertCCSwitchProcessIsNotRunning();
       database.exec("COMMIT");
     } catch (error) {
       try { database.exec("ROLLBACK"); } catch {}

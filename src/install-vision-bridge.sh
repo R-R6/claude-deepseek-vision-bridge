@@ -374,24 +374,20 @@ if [ "$SKIP_LAUNCHCTL" -eq 0 ]; then
             set +a
         fi
         route_coordinator="$bridge_dir/configure-ccswitch-route.sh"
-        if [ "$FORCE_CLOSE_CCSWITCH" -eq 1 ]; then
-            "$route_coordinator" \
-                --ccswitch-directory "$CCSWITCH_DIR" \
-                --ccswitch-app "$CCSWITCH_APP_PATH" \
-                --app-type "$CCSWITCH_APP_TYPE" \
-                --bridge-host "$BRIDGE_HOST" \
-                --bridge-port "$BRIDGE_PORT" \
-                --bridge-env-file "$bridge_dir/bridge.env" \
-                --force-close-ccswitch
-        else
-            "$route_coordinator" \
+        configure_route() {
+            set -- "$route_coordinator" \
                 --ccswitch-directory "$CCSWITCH_DIR" \
                 --ccswitch-app "$CCSWITCH_APP_PATH" \
                 --app-type "$CCSWITCH_APP_TYPE" \
                 --bridge-host "$BRIDGE_HOST" \
                 --bridge-port "$BRIDGE_PORT" \
                 --bridge-env-file "$bridge_dir/bridge.env"
-        fi
+            if [ "$FORCE_CLOSE_CCSWITCH" -eq 1 ]; then
+                set -- "$@" --force-close-ccswitch
+            fi
+            "$@"
+        }
+        configure_route
     fi
     if [ "$COORDINATE_CCSWITCH" -eq 1 ]; then
         if launchctl print "$launch_domain/$CCSWITCH_COORDINATOR_LABEL" >/dev/null 2>&1; then
