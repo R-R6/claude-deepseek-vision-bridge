@@ -165,7 +165,16 @@ function writeFakeLaunchctl(filePath) {
 set -eu
 printf '%s\n' "$*" >> "$FAKE_LAUNCHCTL_LOG"
 case "$1" in
-  print|bootout|kickstart) exit 0 ;;
+  print)
+    [ -f "$FAKE_LAUNCHCTL_LOADED" ]
+    ;;
+  bootout)
+    rm -f "$FAKE_LAUNCHCTL_LOADED"
+    exit 0
+    ;;
+  kickstart)
+    [ -f "$FAKE_LAUNCHCTL_LOADED" ]
+    ;;
   bootstrap)
     count=0
     if [ -f "$FAKE_LAUNCHCTL_COUNT" ]; then
@@ -173,9 +182,11 @@ case "$1" in
     fi
     count=$((count + 1))
     printf '%s\n' "$count" > "$FAKE_LAUNCHCTL_COUNT"
-    if [ "$count" -eq 1 ]; then
+    failures=\${FAKE_LAUNCHCTL_BOOTSTRAP_FAILURES:-0}
+    if [ "$count" -le "$failures" ]; then
       exit 1
     fi
+    : > "$FAKE_LAUNCHCTL_LOADED"
     exit 0
     ;;
   *) exit 1 ;;
@@ -226,7 +237,15 @@ case "$1" in
     exit 1
     ;;
   bootout) stop_bridge; exit 0 ;;
-  bootstrap) start_bridge; exit 0 ;;
+  bootstrap)
+    if [ "\${FAKE_LAUNCHCTL_FAIL_NEXT_BOOTSTRAP:-0}" = 1 ] &&
+        [ ! -f "$FAKE_LAUNCHCTL_BOOTSTRAP_FAILED_MARKER" ]; then
+      : > "$FAKE_LAUNCHCTL_BOOTSTRAP_FAILED_MARKER"
+      exit 1
+    fi
+    start_bridge
+    exit 0
+    ;;
   kickstart)
     if [ "\${2:-}" = -k ]; then stop_bridge; fi
     start_bridge
@@ -452,9 +471,11 @@ printf '%s\n' "17"
     const fakeLaunchctlDirectory = path.join(root, "fake-launchctl-bin");
     const fakeLaunchctlLog = path.join(root, "fake-launchctl.log");
     const fakeLaunchctlCount = path.join(root, "fake-launchctl.count");
+    const fakeLaunchctlLoaded = path.join(root, "fake-launchctl.loaded");
     fs.mkdirSync(rollbackLaunchAgents, { recursive: true });
     fs.mkdirSync(fakeLaunchctlDirectory, { recursive: true });
     fs.writeFileSync(rollbackPlist, originalRollbackPlist, "utf8");
+    fs.writeFileSync(fakeLaunchctlLoaded, "", "utf8");
     writeFakeLaunchctl(path.join(fakeLaunchctlDirectory, "launchctl"));
     const rollbackResult = run("sh", [
       path.join(macosDir, "install-vision-bridge.sh"),
@@ -467,12 +488,14 @@ printf '%s\n' "17"
         PATH: `${fakeLaunchctlDirectory}:${process.env.PATH}`,
         FAKE_LAUNCHCTL_LOG: fakeLaunchctlLog,
         FAKE_LAUNCHCTL_COUNT: fakeLaunchctlCount,
+        FAKE_LAUNCHCTL_LOADED: fakeLaunchctlLoaded,
+        FAKE_LAUNCHCTL_BOOTSTRAP_FAILURES: "6",
       },
     });
     assert.notEqual(rollbackResult.status, 0);
     assert.equal(fs.readFileSync(rollbackPlist, "utf8"), originalRollbackPlist);
     const rollbackCalls = fs.readFileSync(fakeLaunchctlLog, "utf8");
-    assert.equal((rollbackCalls.match(/^bootstrap /gm) || []).length, 2);
+    assert.equal((rollbackCalls.match(/^bootstrap /gm) || []).length, 7);
     assert.match(rollbackCalls, /^bootout /m);
     assert.match(rollbackCalls, /^kickstart /m);
 
@@ -530,6 +553,8 @@ printf '%s\n' "17"
       ".claude/bridge/bridge-rollback-state.sh",
       ".claude/bridge/restart-vision-bridge.sh",
       ".claude/bridge/reinstall-vision-bridge.sh",
+      ".claude/bridge/install-vision-bridge.sh",
+      ".claude/bridge/SKILL.md.template",
       ".claude/bridge/diagnose-vision-bridge.sh",
       ".claude/bridge/configure-ccswitch-route.js",
       ".claude/bridge/configure-ccswitch-route.sh",
@@ -555,11 +580,17 @@ printf '%s\n' "17"
       `${routeRejectedByReinstall.stdout}\n${routeRejectedByReinstall.stderr}`,
       /does not modify CC Switch routes/,
     );
+    const installedReinstall = run("sh", [
+      path.join(bridgeDir, "reinstall-vision-bridge.sh"),
+      "--skip-launchctl",
+    ], { env: { ...process.env, HOME: home } });
+    assert.equal(installedReinstall.status, 0, `${installedReinstall.stdout}\n${installedReinstall.stderr}`);
 
     const managedLaunchctlDirectory = path.join(root, "managed-launchctl-bin");
     const managedLaunchctlLog = path.join(root, "managed-launchctl.log");
     const managedBridgeLog = path.join(root, "managed-bridge.log");
     const managedLaunchctlState = path.join(root, "managed-launchctl.state");
+    const managedBootstrapFailureMarker = path.join(root, "managed-bootstrap-failure.marker");
     fs.mkdirSync(managedLaunchctlDirectory, { recursive: true });
     writeManagedLaunchctl(path.join(managedLaunchctlDirectory, "launchctl"));
     const managedEnvironment = {
@@ -573,6 +604,7 @@ printf '%s\n' "17"
       FAKE_LAUNCHCTL_LOG: managedLaunchctlLog,
       FAKE_LAUNCHCTL_BRIDGE_LOG: managedBridgeLog,
       FAKE_LAUNCHCTL_STATE: managedLaunchctlState,
+      FAKE_LAUNCHCTL_BOOTSTRAP_FAILED_MARKER: managedBootstrapFailureMarker,
     };
     const launchDomain = `gui/${process.getuid()}`;
     assert.equal(
@@ -592,6 +624,8 @@ printf '%s\n' "17"
     const bridgeScriptPath = path.join(bridgeDir, "vision-bridge.js");
     const healthyBridgeScript = fs.readFileSync(bridgeScriptPath, "utf8");
     fs.writeFileSync(bridgeScriptPath, "this is not valid JavaScript\n", "utf8");
+    const bootstrapCallsBeforeRollback = (fs.readFileSync(managedLaunchctlLog, "utf8").match(/^bootstrap /gm) || []).length;
+    managedEnvironment.FAKE_LAUNCHCTL_FAIL_NEXT_BOOTSTRAP = "1";
     const failedRestart = await runAsync("sh", [path.join(bridgeDir, "restart-vision-bridge.sh")], {
       env: managedEnvironment,
     });
@@ -601,6 +635,11 @@ printf '%s\n' "17"
       /Previous Vision Bridge configuration was restored and passed its health check/,
     );
     assert.equal(fs.readFileSync(bridgeScriptPath, "utf8"), healthyBridgeScript);
+    assert.equal(fs.existsSync(managedBootstrapFailureMarker), true);
+    assert.equal(
+      (fs.readFileSync(managedLaunchctlLog, "utf8").match(/^bootstrap /gm) || []).length,
+      bootstrapCallsBeforeRollback + 2,
+    );
     await waitForHealth(bridgePort);
     assert.equal(
       run(path.join(managedLaunchctlDirectory, "launchctl"), ["bootout", `${launchDomain}/${"com.claude.deepseek-vision-bridge"}`], {

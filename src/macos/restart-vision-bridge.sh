@@ -79,6 +79,57 @@ wait_for_health() {
     return 1
 }
 
+wait_for_launch_agent() {
+    attempt=1
+    while [ "$attempt" -le 5 ]; do
+        if launchctl print "$launch_domain/$BRIDGE_LABEL" >/dev/null 2>&1; then
+            return 0
+        fi
+        sleep 0.25
+        attempt=$((attempt + 1))
+    done
+    return 1
+}
+
+bootstrap_launch_agent() {
+    attempt=1
+    while [ "$attempt" -le 5 ]; do
+        if launchctl bootstrap "$launch_domain" "$BRIDGE_PLIST" >/dev/null 2>&1 &&
+            wait_for_launch_agent; then
+            return 0
+        fi
+        sleep 0.25
+        attempt=$((attempt + 1))
+    done
+    return 1
+}
+
+kickstart_launch_agent() {
+    force_restart=$1
+    attempt=1
+    while [ "$attempt" -le 5 ]; do
+        if [ "$force_restart" -eq 1 ]; then
+            if launchctl kickstart -k "$launch_domain/$BRIDGE_LABEL" >/dev/null 2>&1; then
+                launchctl_started=1
+            else
+                launchctl_started=0
+            fi
+        else
+            if launchctl kickstart "$launch_domain/$BRIDGE_LABEL" >/dev/null 2>&1; then
+                launchctl_started=1
+            else
+                launchctl_started=0
+            fi
+        fi
+        if [ "$launchctl_started" -eq 1 ] && wait_for_launch_agent; then
+            return 0
+        fi
+        sleep 0.25
+        attempt=$((attempt + 1))
+    done
+    return 1
+}
+
 launch_domain="gui/$(id -u)"
 command -v launchctl >/dev/null 2>&1 || fail "launchctl is required on macOS."
 launcher_from_plist=$(plutil -extract ProgramArguments.0 raw -o - "$BRIDGE_PLIST" 2>/dev/null || true)
@@ -100,8 +151,8 @@ restore_previous_bridge() {
     [ -n "$previous_snapshot" ] || return 1
     launchctl bootout "$launch_domain/$BRIDGE_LABEL" >/dev/null 2>&1 || true
     bridge_rollback_restore_snapshot "$previous_snapshot" || return 1
-    launchctl bootstrap "$launch_domain" "$BRIDGE_PLIST" >/dev/null 2>&1 || return 1
-    launchctl kickstart "$launch_domain/$BRIDGE_LABEL" >/dev/null 2>&1 || return 1
+    bootstrap_launch_agent || return 1
+    kickstart_launch_agent 0 || return 1
     load_environment
     validate_environment
     wait_for_health
@@ -147,10 +198,10 @@ fi
 
 restart_in_progress=1
 if launchctl print "$launch_domain/$BRIDGE_LABEL" >/dev/null 2>&1; then
-    launchctl kickstart -k "$launch_domain/$BRIDGE_LABEL" || fail "launchctl could not restart $BRIDGE_LABEL"
+    kickstart_launch_agent 1 || fail "launchctl could not restart $BRIDGE_LABEL after retrying"
 else
-    launchctl bootstrap "$launch_domain" "$BRIDGE_PLIST" || fail "launchctl could not load $BRIDGE_PLIST"
-    launchctl kickstart "$launch_domain/$BRIDGE_LABEL" || fail "launchctl could not start $BRIDGE_LABEL"
+    bootstrap_launch_agent || fail "launchctl could not load $BRIDGE_PLIST after retrying"
+    kickstart_launch_agent 0 || fail "launchctl could not start $BRIDGE_LABEL after retrying"
 fi
 
 wait_for_health || fail "Vision Bridge did not pass health check within ${BRIDGE_STARTUP_TIMEOUT_MS} ms."

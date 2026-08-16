@@ -8,10 +8,20 @@ if [ "$(uname -s)" != "Darwin" ]; then
 fi
 
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-SOURCE_ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)
-CORE_DIR=${SOURCE_ROOT}/core
-ROUTING_DIR=${SOURCE_ROOT}/routing
-TEMPLATE_DIR=${SOURCE_ROOT}/templates
+if [ -f "$SCRIPT_DIR/../core/vision-bridge.js" ]; then
+    SOURCE_ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)
+    CORE_DIR=${SOURCE_ROOT}/core
+    ROUTING_DIR=${SOURCE_ROOT}/routing
+    TEMPLATE_DIR=${SOURCE_ROOT}/templates
+    ENV_EXAMPLE_SOURCE=${SOURCE_ROOT}/../.env.example
+else
+    # The installed reinstaller uses the self-contained runtime bundle.
+    SOURCE_ROOT=$SCRIPT_DIR
+    CORE_DIR=$SCRIPT_DIR
+    ROUTING_DIR=$SCRIPT_DIR
+    TEMPLATE_DIR=$SCRIPT_DIR
+    ENV_EXAMPLE_SOURCE=$SCRIPT_DIR/bridge.env.example
+fi
 INSTALL_HOME=${HOME}
 LAUNCH_AGENTS_DIR=${HOME}/Library/LaunchAgents
 BRIDGE_HOST=${BRIDGE_HOST:-127.0.0.1}
@@ -203,6 +213,45 @@ manifest_path=${backup_root}/manifest.tsv
 cleanup() {
     rm -rf "$stage_root"
 }
+wait_for_launch_agent() {
+    agent_label=$1
+    attempt=1
+    while [ "$attempt" -le 5 ]; do
+        if launchctl print "$launch_domain/$agent_label" >/dev/null 2>&1; then
+            return 0
+        fi
+        sleep 0.25
+        attempt=$((attempt + 1))
+    done
+    return 1
+}
+bootstrap_launch_agent() {
+    agent_label=$1
+    agent_plist=$2
+    attempt=1
+    while [ "$attempt" -le 5 ]; do
+        if launchctl bootstrap "$launch_domain" "$agent_plist" >/dev/null 2>&1 &&
+            wait_for_launch_agent "$agent_label"; then
+            return 0
+        fi
+        sleep 0.25
+        attempt=$((attempt + 1))
+    done
+    return 1
+}
+kickstart_launch_agent() {
+    agent_label=$1
+    attempt=1
+    while [ "$attempt" -le 5 ]; do
+        if launchctl kickstart "$launch_domain/$agent_label" >/dev/null 2>&1 &&
+            wait_for_launch_agent "$agent_label"; then
+            return 0
+        fi
+        sleep 0.25
+        attempt=$((attempt + 1))
+    done
+    return 1
+}
 rollback_files() {
     if [ ! -f "$records_path" ]; then return; fi
     while IFS="$(printf '\t')" read -r destination backup existed; do
@@ -226,12 +275,12 @@ rollback_launch_agents() {
 restore_launch_agents() {
     [ -n "$launch_domain" ] || return
     if [ "$bridge_agent_changed" -eq 1 ] && [ "$bridge_agent_was_loaded" -eq 1 ] && [ -f "$plist_path" ]; then
-        launchctl bootstrap "$launch_domain" "$plist_path" >/dev/null 2>&1 || true
-        launchctl kickstart "$launch_domain/$BRIDGE_LABEL" >/dev/null 2>&1 || true
+        bootstrap_launch_agent "$BRIDGE_LABEL" "$plist_path" || return 1
+        kickstart_launch_agent "$BRIDGE_LABEL" || return 1
     fi
     if [ "$coordinator_agent_changed" -eq 1 ] && [ "$coordinator_agent_was_loaded" -eq 1 ] && [ -f "$coordinator_plist_path" ]; then
-        launchctl bootstrap "$launch_domain" "$coordinator_plist_path" >/dev/null 2>&1 || true
-        launchctl kickstart "$launch_domain/$CCSWITCH_COORDINATOR_LABEL" >/dev/null 2>&1 || true
+        bootstrap_launch_agent "$CCSWITCH_COORDINATOR_LABEL" "$coordinator_plist_path" || return 1
+        kickstart_launch_agent "$CCSWITCH_COORDINATOR_LABEL" || return 1
     fi
 }
 verify_restored_health() (
@@ -266,9 +315,10 @@ verify_restored_health() (
 rollback_install() {
     rollback_launch_agents
     rollback_files
-    restore_launch_agents
-    if ! verify_restored_health; then
-        printf '%s\n' "Warning: restored Vision Bridge did not pass its health check; inspect the install backup." >&2
+    if ! restore_launch_agents; then
+        printf '%s\n' "ERROR: previous launch agents could not be restored; inspect the install backup." >&2
+    elif ! verify_restored_health; then
+        printf '%s\n' "ERROR: restored Vision Bridge did not pass its health check; inspect the install backup." >&2
     fi
     cleanup
 }
@@ -409,6 +459,7 @@ stage_file "$SCRIPT_DIR/start-vision-bridge.sh" "$bridge_dir/start-vision-bridge
 stage_file "$SCRIPT_DIR/bridge-rollback-state.sh" "$bridge_dir/bridge-rollback-state.sh" bridge 755
 stage_file "$SCRIPT_DIR/restart-vision-bridge.sh" "$bridge_dir/restart-vision-bridge.sh" bridge 755
 stage_file "$SCRIPT_DIR/reinstall-vision-bridge.sh" "$bridge_dir/reinstall-vision-bridge.sh" bridge 755
+stage_file "$SCRIPT_DIR/install-vision-bridge.sh" "$bridge_dir/install-vision-bridge.sh" bridge 755
 stage_file "$SCRIPT_DIR/diagnose-vision-bridge.sh" "$bridge_dir/diagnose-vision-bridge.sh" bridge 755
 stage_file "$ROUTING_DIR/configure-ccswitch-route.js" "$bridge_dir/configure-ccswitch-route.js" bridge 755
 stage_file "$SCRIPT_DIR/configure-ccswitch-route.sh" "$bridge_dir/configure-ccswitch-route.sh" bridge 755
@@ -417,7 +468,8 @@ stage_file "$CORE_DIR/vision.js" "$skill_dir/vision.js" skill 755
 stage_file "$SCRIPT_DIR/vision.sh" "$skill_dir/vision.sh" skill 755
 stage_file "$CORE_DIR/vision-client.js" "$skill_dir/vision-client.js" skill 644
 stage_file "$TEMPLATE_DIR/SKILL.md.template" "$skill_dir/SKILL.md" skill 644
-stage_file "$SOURCE_ROOT/../.env.example" "$bridge_dir/bridge.env.example" bridge 600
+stage_file "$TEMPLATE_DIR/SKILL.md.template" "$bridge_dir/SKILL.md.template" bridge 644
+stage_file "$ENV_EXAMPLE_SOURCE" "$bridge_dir/bridge.env.example" bridge 600
 
 if [ -n "$ENV_FILE_SOURCE" ]; then
     stage_file "$ENV_FILE_SOURCE" "$bridge_dir/bridge.env" config 600
@@ -478,9 +530,9 @@ if [ "$SKIP_LAUNCHCTL" -eq 0 ]; then
         bridge_agent_changed=1
         launchctl bootout "$launch_domain/$BRIDGE_LABEL" >/dev/null 2>&1 || fail "could not unload the existing $BRIDGE_LABEL agent"
     fi
-    launchctl bootstrap "$launch_domain" "$plist_path" || fail "could not load $plist_path"
+    bootstrap_launch_agent "$BRIDGE_LABEL" "$plist_path" || fail "could not load $plist_path after retrying"
     bridge_agent_changed=1
-    launchctl kickstart "$launch_domain/$BRIDGE_LABEL" >/dev/null 2>&1 || fail "could not start $BRIDGE_LABEL"
+    kickstart_launch_agent "$BRIDGE_LABEL" || fail "could not start $BRIDGE_LABEL after retrying"
     "$bridge_dir/restart-vision-bridge.sh" || fail "the installed Vision Bridge did not pass its health check"
     if [ "$CONFIGURE_ROUTE" -eq 1 ]; then
         if [ -f "$bridge_dir/bridge.env" ]; then
@@ -511,9 +563,9 @@ if [ "$SKIP_LAUNCHCTL" -eq 0 ]; then
             coordinator_agent_changed=1
             launchctl bootout "$launch_domain/$CCSWITCH_COORDINATOR_LABEL" >/dev/null 2>&1 || fail "could not unload the existing $CCSWITCH_COORDINATOR_LABEL agent"
         fi
-        launchctl bootstrap "$launch_domain" "$coordinator_plist_path" || fail "could not load $coordinator_plist_path"
+        bootstrap_launch_agent "$CCSWITCH_COORDINATOR_LABEL" "$coordinator_plist_path" || fail "could not load $coordinator_plist_path after retrying"
         coordinator_agent_changed=1
-        launchctl kickstart "$launch_domain/$CCSWITCH_COORDINATOR_LABEL" >/dev/null 2>&1 || fail "could not start $CCSWITCH_COORDINATOR_LABEL"
+        kickstart_launch_agent "$CCSWITCH_COORDINATOR_LABEL" || fail "could not start $CCSWITCH_COORDINATOR_LABEL after retrying"
     fi
 fi
 
