@@ -143,9 +143,50 @@ function assertDatabaseIsNotInUse(databasePath) {
   }
 }
 
-function assertCCSwitchProcessIsNotRunning() {
+function canonicalPath(filePath) {
+  try {
+    return fs.realpathSync(filePath);
+  } catch {
+    return path.resolve(filePath);
+  }
+}
+
+function isInsideCanonicalDir(candidatePath, rootDir) {
+  if (typeof candidatePath !== "string" || !candidatePath.trim()) return false;
+  const root = canonicalPath(rootDir);
+  const candidate = canonicalPath(candidatePath);
+  const relative = path.relative(root, candidate);
+  return Boolean(relative)
+    && relative !== ".."
+    && !relative.startsWith(`..${path.sep}`)
+    && !path.isAbsolute(relative);
+}
+
+function resolveCCSwitchPgrepPath(databasePath) {
+  const fallback = "/usr/bin/pgrep";
+  const override = process.env.VISION_BRIDGE_TEST_PGREP;
+  if (typeof override !== "string" || !override.trim()) {
+    return fallback;
+  }
+  const tmpDir = os.tmpdir();
+  if (!isInsideCanonicalDir(databasePath, tmpDir) || !isInsideCanonicalDir(override, tmpDir)) {
+    return fallback;
+  }
+  try {
+    const resolved = fs.realpathSync(override);
+    const stats = fs.statSync(resolved);
+    if (!stats.isFile() || (stats.mode & 0o111) === 0) {
+      return fallback;
+    }
+    return resolved;
+  } catch {
+    return fallback;
+  }
+}
+
+function assertCCSwitchProcessIsNotRunning(databasePath) {
   if (process.platform !== "darwin") return;
-  const result = spawnSync("/usr/bin/pgrep", ["-x", "cc-switch"], {
+  const result = spawnSync(resolveCCSwitchPgrepPath(databasePath), ["-x", "cc-switch"], {
     encoding: "utf8",
     windowsHide: true,
   });
@@ -362,6 +403,10 @@ function reportStatus(database, row) {
 }
 
 async function main() {
+  if (process.argv[2] === "--resolve-test-pgrep") {
+    process.stdout.write(`${resolveCCSwitchPgrepPath(process.argv[3] || "")}\n`);
+    return;
+  }
   const options = parseArgs(process.argv.slice(2));
   if (options.healthOnly) {
     const bridgeAuthToken = readBridgeAuthToken(options.bridgeEnvFile);
@@ -433,7 +478,7 @@ async function main() {
     return;
   }
 
-  assertCCSwitchProcessIsNotRunning();
+  assertCCSwitchProcessIsNotRunning(options.databasePath);
   assertDatabaseIsNotInUse(options.databasePath);
   const database = loadDatabase(DatabaseSync, options.databasePath);
   try {
@@ -465,14 +510,14 @@ async function main() {
     // Re-check immediately before acquiring the write lock. The coordinator
     // normally keeps CC Switch closed, while this closes the remaining
     // process-start race for direct updater callers.
-    assertCCSwitchProcessIsNotRunning();
+    assertCCSwitchProcessIsNotRunning(options.databasePath);
     database.exec("BEGIN IMMEDIATE");
     try {
       // A process can start after the preflight check but before SQLite grants
       // the write lock. Refuse the write while the transaction is held, and
       // check again before commit so a newly started CC Switch is not left
       // beside a route mutation.
-      assertCCSwitchProcessIsNotRunning();
+      assertCCSwitchProcessIsNotRunning(options.databasePath);
       const result = database.prepare(
         "UPDATE providers SET settings_config = json_set(settings_config, '$.env.ANTHROPIC_BASE_URL', ?) WHERE id = ? AND app_type = ?",
       ).run(target, writableRow.id, writableRow.app_type);
@@ -480,7 +525,7 @@ async function main() {
       if (readProviderRoute(database, writableRow) !== target) {
         throw new Error("CC Switch provider route verification failed");
       }
-      assertCCSwitchProcessIsNotRunning();
+      assertCCSwitchProcessIsNotRunning(options.databasePath);
       database.exec("COMMIT");
     } catch (error) {
       try { database.exec("ROLLBACK"); } catch {}

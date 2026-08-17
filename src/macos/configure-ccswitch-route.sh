@@ -182,7 +182,14 @@ restore_database() {
 }
 
 get_ccswitch_pids() {
-    /usr/bin/pgrep -x "$CCSWITCH_EXECUTABLE_NAME" 2>/dev/null || true
+    pgrep_bin=/usr/bin/pgrep
+    if [ -n "${VISION_BRIDGE_TEST_PGREP:-}" ]; then
+        resolved=$("$BRIDGE_NODE" "$ROUTE_SCRIPT" --resolve-test-pgrep "$DATABASE_PATH" 2>/dev/null || true)
+        if [ -n "$resolved" ]; then
+            pgrep_bin=$resolved
+        fi
+    fi
+    "$pgrep_bin" -x "$CCSWITCH_EXECUTABLE_NAME" 2>/dev/null || true
 }
 
 validate_ccswitch_process() {

@@ -183,7 +183,7 @@ set -e
 [ "$snapshot_status" -ne 2 ] || fail "the protected previous Vision Bridge snapshot is invalid"
 
 if launchctl print "$launch_domain/$BRIDGE_LABEL" >/dev/null 2>&1; then
-    if ! health_passes; then
+    if ! wait_for_health; then
         [ "$snapshot_status" -eq 0 ] || fail "the existing managed Vision Bridge is not healthy and no protected previous state is available"
         previous_bridge_healthy=1
         restart_in_progress=1

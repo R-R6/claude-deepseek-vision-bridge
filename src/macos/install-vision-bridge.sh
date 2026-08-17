@@ -464,6 +464,8 @@ stage_file "$SCRIPT_DIR/diagnose-vision-bridge.sh" "$bridge_dir/diagnose-vision-
 stage_file "$ROUTING_DIR/configure-ccswitch-route.js" "$bridge_dir/configure-ccswitch-route.js" bridge 755
 stage_file "$SCRIPT_DIR/configure-ccswitch-route.sh" "$bridge_dir/configure-ccswitch-route.sh" bridge 755
 stage_file "$SCRIPT_DIR/start-ccswitch-after-bridge.sh" "$bridge_dir/start-ccswitch-after-bridge.sh" bridge 755
+stage_file "$CORE_DIR/vision.js" "$bridge_dir/vision.js" bridge 755
+stage_file "$SCRIPT_DIR/vision.sh" "$bridge_dir/vision.sh" bridge 755
 stage_file "$CORE_DIR/vision.js" "$skill_dir/vision.js" skill 755
 stage_file "$SCRIPT_DIR/vision.sh" "$skill_dir/vision.sh" skill 755
 stage_file "$CORE_DIR/vision-client.js" "$skill_dir/vision-client.js" skill 644

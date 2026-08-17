@@ -16,8 +16,6 @@ const coreDir = path.join(sourceRoot, "core");
 const routingDir = path.join(sourceRoot, "routing");
 const macosDir = path.join(sourceRoot, "macos");
 const nodePath = process.execPath;
-const ccSwitchProcessRunning = process.platform === "darwin"
-  && run("/usr/bin/pgrep", ["-x", "cc-switch"]).status === 0;
 
 function getDatabaseSync() {
   try {
@@ -160,6 +158,39 @@ function writeExecutable(filePath, content) {
   fs.chmodSync(filePath, 0o755);
 }
 
+function writeFakeBridgeHealth(filePath) {
+  fs.writeFileSync(filePath, [
+    "const fs = require(\"node:fs\");",
+    "const countPath = process.env.FAKE_HEALTH_COUNT;",
+    "const failUntil = Number(process.env.FAKE_HEALTH_FAIL_UNTIL || \"0\");",
+    "let count = 0;",
+    "if (countPath && fs.existsSync(countPath)) {",
+    "  count = Number(fs.readFileSync(countPath, \"utf8\")) || 0;",
+    "}",
+    "count += 1;",
+    "if (countPath) fs.writeFileSync(countPath, String(count));",
+    "process.exit(count <= failUntil ? 1 : 0);",
+    "",
+  ].join("\n"), { mode: 0o755 });
+}
+
+function writeBridgePlist(plistPath, launcherPath) {
+  const esc = (value) => String(value)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+  fs.writeFileSync(plistPath, `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>Label</key><string>com.claude.deepseek-vision-bridge</string>
+<key>ProgramArguments</key><array>
+<string>${esc(launcherPath)}</string>
+<string>--foreground</string>
+</array>
+</dict></plist>
+`);
+}
+
 function writeFakeLaunchctl(filePath) {
   writeExecutable(filePath, String.raw`#!/bin/sh
 set -eu
@@ -182,7 +213,7 @@ case "$1" in
     fi
     count=$((count + 1))
     printf '%s\n' "$count" > "$FAKE_LAUNCHCTL_COUNT"
-    failures=\${FAKE_LAUNCHCTL_BOOTSTRAP_FAILURES:-0}
+    failures=${"$"}{FAKE_LAUNCHCTL_BOOTSTRAP_FAILURES:-0}
     if [ "$count" -le "$failures" ]; then
       exit 1
     fi
@@ -238,7 +269,7 @@ case "$1" in
     ;;
   bootout) stop_bridge; exit 0 ;;
   bootstrap)
-    if [ "\${FAKE_LAUNCHCTL_FAIL_NEXT_BOOTSTRAP:-0}" = 1 ] &&
+    if [ "${"$"}{FAKE_LAUNCHCTL_FAIL_NEXT_BOOTSTRAP:-0}" = 1 ] &&
         [ ! -f "$FAKE_LAUNCHCTL_BOOTSTRAP_FAILED_MARKER" ]; then
       : > "$FAKE_LAUNCHCTL_BOOTSTRAP_FAILED_MARKER"
       exit 1
@@ -247,7 +278,7 @@ case "$1" in
     exit 0
     ;;
   kickstart)
-    if [ "\${2:-}" = -k ]; then stop_bridge; fi
+    if [ "${"$"}{2:-}" = -k ]; then stop_bridge; fi
     start_bridge
     exit 0
     ;;
@@ -529,6 +560,78 @@ printf '%s\n' "17"
     assert.equal((interruptCalls.match(/^bootstrap /gm) || []).length, 1);
     assert.match(interruptCalls, /^bootout /m);
 
+    const prepareLoadedRestartFixture = (name, timeoutMs) => {
+      const raceHome = path.join(root, name);
+      const raceBridgeDir = path.join(raceHome, ".claude", "bridge");
+      const raceLaunchAgents = path.join(raceHome, "Library", "LaunchAgents");
+      const racePlist = path.join(raceLaunchAgents, "com.claude.deepseek-vision-bridge.plist");
+      const raceBin = path.join(raceHome, "bin");
+      const healthCount = path.join(raceHome, "health.count");
+      const loaded = path.join(raceHome, "launchctl.loaded");
+      fs.mkdirSync(raceBridgeDir, { recursive: true });
+      fs.mkdirSync(raceLaunchAgents, { recursive: true });
+      fs.mkdirSync(raceBin, { recursive: true });
+      const launcher = path.join(raceBridgeDir, "start-vision-bridge.sh");
+      writeExecutable(launcher, "#!/bin/sh\nexit 0\n");
+      fs.writeFileSync(path.join(raceBridgeDir, "vision-bridge.js"), "/* restart-race fixture */\n");
+      fs.writeFileSync(path.join(raceBridgeDir, "vision-client.js"), "/* restart-race fixture */\n");
+      fs.copyFileSync(
+        path.join(macosDir, "bridge-rollback-state.sh"),
+        path.join(raceBridgeDir, "bridge-rollback-state.sh"),
+      );
+      writeFakeBridgeHealth(path.join(raceBridgeDir, "bridge-health.js"));
+      writeBridgePlist(racePlist, launcher);
+      fs.writeFileSync(path.join(raceBridgeDir, "bridge.env"), [
+        "UPSTREAM=http://127.0.0.1:1/v1",
+        "VISION_BASE_URL=http://127.0.0.1:1/v1",
+        "VISION_MODEL=test-vision",
+        "VISION_API_KEY=restart-race-test-secret",
+        "BRIDGE_HOST=127.0.0.1",
+        "BRIDGE_PORT=15720",
+        `BRIDGE_STARTUP_TIMEOUT_MS=${timeoutMs}`,
+        `BRIDGE_NODE=${nodePath}`,
+      ].join("\n") + "\n", { mode: 0o600 });
+      fs.chmodSync(path.join(raceBridgeDir, "bridge.env"), 0o600);
+      fs.writeFileSync(loaded, "");
+      fs.writeFileSync(healthCount, "0");
+      writeFakeLaunchctl(path.join(raceBin, "launchctl"));
+      return { raceHome, raceBridgeDir, racePlist, raceBin, healthCount, loaded };
+    };
+    const runLoadedRestart = (fixture, failUntil) => run("sh", [
+      path.join(macosDir, "restart-vision-bridge.sh"),
+    ], {
+      env: {
+        ...process.env,
+        HOME: fixture.raceHome,
+        BRIDGE_DIR: fixture.raceBridgeDir,
+        BRIDGE_ENV_FILE: path.join(fixture.raceBridgeDir, "bridge.env"),
+        BRIDGE_PLIST: fixture.racePlist,
+        PATH: `${fixture.raceBin}:${process.env.PATH}`,
+        FAKE_LAUNCHCTL_LOG: path.join(fixture.raceHome, "launchctl.log"),
+        FAKE_LAUNCHCTL_LOADED: fixture.loaded,
+        FAKE_LAUNCHCTL_COUNT: path.join(fixture.raceHome, "launchctl.count"),
+        FAKE_HEALTH_COUNT: fixture.healthCount,
+        FAKE_HEALTH_FAIL_UNTIL: String(failUntil),
+      },
+    });
+
+    const recoveredFixture = prepareLoadedRestartFixture("Restart Race Recover Home", 5000);
+    const recoveredRestart = runLoadedRestart(recoveredFixture, 3);
+    assert.equal(recoveredRestart.status, 0, `${recoveredRestart.stdout}\n${recoveredRestart.stderr}`);
+    assert.match(recoveredRestart.stdout, /passed health check/);
+    assert.doesNotMatch(`${recoveredRestart.stdout}\n${recoveredRestart.stderr}`, /restart-race-test-secret/);
+    assert.ok(Number(fs.readFileSync(recoveredFixture.healthCount, "utf8")) >= 4);
+
+    const timeoutFixture = prepareLoadedRestartFixture("Restart Race Timeout Home", 1000);
+    const timeoutRestart = runLoadedRestart(timeoutFixture, 9999);
+    assert.notEqual(timeoutRestart.status, 0);
+    assert.match(
+      `${timeoutRestart.stdout}\n${timeoutRestart.stderr}`,
+      /the existing managed Vision Bridge is not healthy and no protected previous state is available/,
+    );
+    assert.doesNotMatch(`${timeoutRestart.stdout}\n${timeoutRestart.stderr}`, /restart-race-test-secret/);
+    assert.ok(Number(fs.readFileSync(timeoutFixture.healthCount, "utf8")) >= 2);
+
     const installer = run("sh", [
       path.join(macosDir, "install-vision-bridge.sh"),
       "--env-file", envFile,
@@ -554,6 +657,8 @@ printf '%s\n' "17"
       ".claude/bridge/restart-vision-bridge.sh",
       ".claude/bridge/reinstall-vision-bridge.sh",
       ".claude/bridge/install-vision-bridge.sh",
+      ".claude/bridge/vision.js",
+      ".claude/bridge/vision.sh",
       ".claude/bridge/SKILL.md.template",
       ".claude/bridge/diagnose-vision-bridge.sh",
       ".claude/bridge/configure-ccswitch-route.js",
@@ -580,11 +685,95 @@ printf '%s\n' "17"
       `${routeRejectedByReinstall.stdout}\n${routeRejectedByReinstall.stderr}`,
       /does not modify CC Switch routes/,
     );
-    const installedReinstall = run("sh", [
-      path.join(bridgeDir, "reinstall-vision-bridge.sh"),
-      "--skip-launchctl",
-    ], { env: { ...process.env, HOME: home } });
-    assert.equal(installedReinstall.status, 0, `${installedReinstall.stdout}\n${installedReinstall.stderr}`);
+    assert.equal(fs.existsSync(path.join(bridgeDir, "vision.js")), true);
+    assert.equal(fs.existsSync(path.join(bridgeDir, "vision.sh")), true);
+    assert.notEqual(fs.statSync(path.join(bridgeDir, "vision.js")).mode & 0o111, 0);
+    assert.notEqual(fs.statSync(path.join(bridgeDir, "vision.sh")).mode & 0o111, 0);
+
+    const isolatedReinstallHome = path.join(root, "Isolated Reinstall Home");
+    const isolatedBridgeDir = path.join(isolatedReinstallHome, ".claude", "bridge");
+    const isolatedSkillDir = path.join(isolatedReinstallHome, ".claude", "skills", "vision");
+    fs.cpSync(path.join(home, ".claude"), path.join(isolatedReinstallHome, ".claude"), { recursive: true });
+    fs.mkdirSync(path.join(isolatedReinstallHome, "Library", "LaunchAgents"), { recursive: true });
+    assert.equal(fs.existsSync(path.join(isolatedReinstallHome, ".claude", "core")), false);
+
+    const decoyCwd = path.join(root, "hidden-source-cwd");
+    fs.mkdirSync(path.join(decoyCwd, "src", "core"), { recursive: true });
+    fs.mkdirSync(path.join(decoyCwd, "src", "macos"), { recursive: true });
+    fs.writeFileSync(path.join(decoyCwd, "src", "core", "vision.js"), "/* decoy-should-not-install */\n");
+    fs.writeFileSync(path.join(decoyCwd, "src", "macos", "vision.sh"), "#!/bin/sh\n# decoy-should-not-install\nexit 99\n");
+    fs.writeFileSync(path.join(decoyCwd, "src", "core", "vision-bridge.js"), "throw new Error('decoy');\n");
+
+    const isolatedEnvFile = path.join(root, "isolated-reinstall.env");
+    fs.writeFileSync(isolatedEnvFile, [
+      "UPSTREAM=http://127.0.0.1:1/v1",
+      `VISION_BASE_URL=http://127.0.0.1:${visionPort}/v1`,
+      "VISION_MODEL=test-vision",
+      "VISION_API_KEY=mac-startup-test-secret",
+      "BRIDGE_HOST=127.0.0.1",
+      `BRIDGE_PORT=${healthPort}`,
+      "BRIDGE_STARTUP_TIMEOUT_MS=5000",
+      `BRIDGE_NODE=${nodePath}`,
+    ].join("\n") + "\n", { mode: 0o600 });
+    fs.chmodSync(isolatedEnvFile, 0o600);
+
+    const reinstallLaunchctlDirectory = path.join(root, "reinstall-launchctl-bin");
+    const reinstallLaunchctlLog = path.join(root, "reinstall-launchctl.log");
+    const reinstallLaunchctlLoaded = path.join(root, "reinstall-launchctl.loaded");
+    const reinstallLaunchctlCount = path.join(root, "reinstall-launchctl.count");
+    fs.mkdirSync(reinstallLaunchctlDirectory, { recursive: true });
+    writeFakeLaunchctl(path.join(reinstallLaunchctlDirectory, "launchctl"));
+
+    const isolatedReinstallEnv = { ...process.env };
+    delete isolatedReinstallEnv.BRIDGE_DIR;
+    delete isolatedReinstallEnv.BRIDGE_ENV_FILE;
+    delete isolatedReinstallEnv.BRIDGE_PLIST;
+    delete isolatedReinstallEnv.BRIDGE_AUTH_TOKEN;
+    delete isolatedReinstallEnv.BRIDGE_HOST;
+    delete isolatedReinstallEnv.BRIDGE_PORT;
+    delete isolatedReinstallEnv.BRIDGE_NODE;
+    delete isolatedReinstallEnv.BRIDGE_STARTUP_TIMEOUT_MS;
+    const isolatedReinstall = await runAsync("sh", [
+      path.join(isolatedBridgeDir, "reinstall-vision-bridge.sh"),
+      "--env-file", isolatedEnvFile,
+      "--bridge-port", String(healthPort),
+    ], {
+      cwd: decoyCwd,
+      env: {
+        ...isolatedReinstallEnv,
+        HOME: isolatedReinstallHome,
+        PATH: `${reinstallLaunchctlDirectory}:${path.dirname(nodePath)}:${process.env.PATH}`,
+        FAKE_LAUNCHCTL_LOG: reinstallLaunchctlLog,
+        FAKE_LAUNCHCTL_LOADED: reinstallLaunchctlLoaded,
+        FAKE_LAUNCHCTL_COUNT: reinstallLaunchctlCount,
+      },
+    });
+    assert.equal(isolatedReinstall.status, 0, `${isolatedReinstall.stdout}\n${isolatedReinstall.stderr}`);
+    assert.doesNotMatch(
+      `${isolatedReinstall.stdout}\n${isolatedReinstall.stderr}`,
+      /mac-startup-test-secret|decoy-should-not-install/,
+    );
+    assert.equal(fs.existsSync(path.join(isolatedBridgeDir, "vision.js")), true);
+    assert.equal(fs.existsSync(path.join(isolatedBridgeDir, "vision.sh")), true);
+    assert.equal(fs.existsSync(path.join(isolatedSkillDir, "vision.js")), true);
+    assert.equal(fs.existsSync(path.join(isolatedSkillDir, "vision.sh")), true);
+    assert.equal(
+      fs.readFileSync(path.join(isolatedBridgeDir, "vision.js"), "utf8"),
+      fs.readFileSync(path.join(bridgeDir, "vision.js"), "utf8"),
+    );
+    assert.equal(
+      fs.readFileSync(path.join(isolatedSkillDir, "vision.js"), "utf8"),
+      fs.readFileSync(path.join(isolatedBridgeDir, "vision.js"), "utf8"),
+    );
+    assert.equal(
+      fs.readFileSync(path.join(isolatedSkillDir, "vision.sh"), "utf8"),
+      fs.readFileSync(path.join(isolatedBridgeDir, "vision.sh"), "utf8"),
+    );
+    assert.doesNotMatch(fs.readFileSync(path.join(isolatedBridgeDir, "vision.js"), "utf8"), /decoy-should-not-install/);
+    assert.doesNotMatch(fs.readFileSync(path.join(isolatedBridgeDir, "vision.sh"), "utf8"), /decoy-should-not-install/);
+    const reinstallCalls = fs.readFileSync(reinstallLaunchctlLog, "utf8");
+    assert.match(reinstallCalls, /^bootstrap /m);
+    assert.match(reinstallCalls, /^kickstart /m);
 
     const managedLaunchctlDirectory = path.join(root, "managed-launchctl-bin");
     const managedLaunchctlLog = path.join(root, "managed-launchctl.log");
@@ -648,9 +837,84 @@ printf '%s\n' "17"
       0,
     );
 
-    if (DatabaseSync && !ccSwitchProcessRunning) {
-      const routeEnvironment = { ...process.env };
+    if (DatabaseSync) {
+      const fakePgrepLog = path.join(root, "fake-pgrep.log");
+      const fakePgrepPath = path.join(root, "fake-pgrep");
+      writeExecutable(fakePgrepPath, String.raw`#!/bin/sh
+printf '%s\n' "invoked" >> "$FAKE_PGREP_LOG"
+exit 1
+`);
+      const fakePgrepRealPath = fs.realpathSync(fakePgrepPath);
+      const routeEnvironment = {
+        ...process.env,
+        VISION_BRIDGE_TEST_PGREP: fakePgrepPath,
+        FAKE_PGREP_LOG: fakePgrepLog,
+      };
       delete routeEnvironment.BRIDGE_AUTH_TOKEN;
+      const resolveTestPgrep = (database, pgrepOverride = fakePgrepPath) => run(nodePath, [
+        path.join(routingDir, "configure-ccswitch-route.js"),
+        "--resolve-test-pgrep",
+        database,
+      ], {
+        env: {
+          ...process.env,
+          VISION_BRIDGE_TEST_PGREP: pgrepOverride,
+        },
+      }).stdout.trim();
+      assert.equal(resolveTestPgrep(databasePath), fakePgrepRealPath);
+      const unsetPgrepEnv = { ...process.env };
+      delete unsetPgrepEnv.VISION_BRIDGE_TEST_PGREP;
+      assert.equal(
+        run(nodePath, [
+          path.join(routingDir, "configure-ccswitch-route.js"),
+          "--resolve-test-pgrep",
+          databasePath,
+        ], { env: unsetPgrepEnv }).stdout.trim(),
+        "/usr/bin/pgrep",
+      );
+
+      const outsideRoot = `${fs.realpathSync(os.tmpdir())}-pgrep-outside-${process.pid}`;
+      fs.mkdirSync(outsideRoot, { recursive: true });
+      try {
+        const outsideDatabasePath = path.join(outsideRoot, "cc-switch.db");
+        fs.copyFileSync(databasePath, outsideDatabasePath);
+        assert.equal(resolveTestPgrep(outsideDatabasePath), "/usr/bin/pgrep");
+
+        const traversalPgrep = `${fakePgrepPath}/../../../../../../../../usr/bin/true`;
+        assert.equal(resolveTestPgrep(databasePath, traversalPgrep), "/usr/bin/pgrep");
+
+        const symlinkPgrep = path.join(root, "symlink-pgrep");
+        fs.symlinkSync("/usr/bin/true", symlinkPgrep);
+        assert.equal(resolveTestPgrep(databasePath, symlinkPgrep), "/usr/bin/pgrep");
+
+        const prefixSiblingPgrep = path.join(outsideRoot, "fake-pgrep");
+        fs.copyFileSync(fakePgrepPath, prefixSiblingPgrep);
+        fs.chmodSync(prefixSiblingPgrep, 0o755);
+        assert.equal(resolveTestPgrep(databasePath, prefixSiblingPgrep), "/usr/bin/pgrep");
+
+        const shellResolve = (database, pgrepOverride) => run("sh", ["-eu", "-c", [
+          "pgrep_bin=/usr/bin/pgrep",
+          "if [ -n \"${VISION_BRIDGE_TEST_PGREP:-}\" ]; then",
+          "  resolved=$(\"$BRIDGE_NODE\" \"$ROUTE_SCRIPT\" --resolve-test-pgrep \"$DATABASE_PATH\" 2>/dev/null || true)",
+          "  [ -n \"$resolved\" ] && pgrep_bin=$resolved",
+          "fi",
+          "printf '%s\\n' \"$pgrep_bin\"",
+        ].join("\n")], {
+          env: {
+            ...process.env,
+            BRIDGE_NODE: nodePath,
+            ROUTE_SCRIPT: path.join(routingDir, "configure-ccswitch-route.js"),
+            DATABASE_PATH: database,
+            VISION_BRIDGE_TEST_PGREP: pgrepOverride,
+          },
+        }).stdout.trim();
+        assert.equal(shellResolve(databasePath, fakePgrepPath), fakePgrepRealPath);
+        assert.equal(shellResolve(outsideDatabasePath, fakePgrepPath), "/usr/bin/pgrep");
+        assert.equal(shellResolve(databasePath, traversalPgrep), "/usr/bin/pgrep");
+      } finally {
+        fs.rmSync(outsideRoot, { recursive: true, force: true });
+      }
+
       fs.mkdirSync(backupDirectory, { recursive: true, mode: 0o755 });
       fs.chmodSync(backupDirectory, 0o755);
       const routeResult = await runAsync(nodePath, [
@@ -663,6 +927,7 @@ printf '%s\n' "17"
         "--bridge-env-file", path.join(root, "missing-bridge.env"),
       ], { env: routeEnvironment });
       assert.equal(routeResult.status, 0, `${routeResult.stdout}\n${routeResult.stderr}`);
+      assert.match(fs.readFileSync(fakePgrepLog, "utf8"), /invoked/);
       assert.equal(readRoute(DatabaseSync, databasePath), `http://127.0.0.1:${healthPort}`);
       assert.equal(fs.existsSync(path.join(backupDirectory, "cc-switch.db")), true);
       assert.equal(fs.statSync(backupDirectory).mode & 0o077, 0);
@@ -882,10 +1147,8 @@ printf '%s\n' "17"
         `${mismatchedSettingsResult.stdout}\n${mismatchedSettingsResult.stderr}`,
         /does not match the database/,
       );
-    } else if (!DatabaseSync) {
-      console.log("macOS CC Switch route smoke test: SKIP (node:sqlite unavailable)");
     } else {
-      console.log("macOS CC Switch route smoke test: SKIP (CC Switch is running; route mutation requires it to be stopped)");
+      console.log("macOS CC Switch route smoke test: SKIP (node:sqlite unavailable)");
     }
 
     const skillEnvironment = { ...process.env, HOME: home };
